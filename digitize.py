@@ -14,6 +14,7 @@ _sentinel = object()
 SIMPLE_REP_PATTERN = r"(?:time|occurence|instance)s?"
 COMPLEX_REP_PATTERN = r"(?:time|occurence|instance|attempt|try|tries)s?(?: (?:at|of))?(?: (?:which|when))?"
 
+
 DigitizeMode = Literal["default", "token", "strip", "num", "norm"]
 
 @dataclass
@@ -488,6 +489,9 @@ def digitize(
         if t == "point":
             return True
 
+        if t == "pi":
+            return True
+
         # allow digit-spelling zero tokens to stay inside phrases
         if t in {"oh", "o"}:
             return True
@@ -552,6 +556,19 @@ def digitize(
 
         if not core:
             return None
+
+        # ---- PI handling ----
+        # "pi"
+        if core == ["pi"]:
+            return (("PI", 1), False, False)
+
+        # "<num> pi" or "<wordnum> pi" (e.g. "2 pi", "two pi")
+        if len(core) == 2 and core[1] == "pi":
+            k = core[0]
+            if k.isdigit():
+                return (("PI", int(k)), False, False)
+            if k in word_to_num:
+                return (("PI", word_to_num[k]), False, False)
 
         # -------------------------
         # FRACTIONS: "<numerator> <denominator>"
@@ -880,6 +897,10 @@ def digitize(
         for w in norm:
             if w == "and":
                 continue
+            if w == "pi":
+                has_convertible = True
+                break
+
             if w in fraction_den_word:
                 has_convertible = True
                 break
@@ -918,8 +939,33 @@ def digitize(
         else:
             n, is_ord, is_time = parsed
 
+            # pi
+            # pi
+            if isinstance(n, tuple) and len(n) == 2 and n[0] == "PI":
+                coef = n[1]
+
+                if do_simple_evals and coef == 1:
+                    num = _pi_decimal_str(res)     # <-- this makes "pi" become digits
+                else:
+                    num = "pi" if coef == 1 else f"{coef}{mult}pi"
+
+                out.append(
+                    fmt
+                    .replace("%n", num)
+                    .replace("%s", "s")
+                    .replace("%r", "x")
+                    .replace("%i", "".join(raw))
+                )
+                raw = []
+                norm = []
+                if pending_ws:
+                    out.append(pending_ws)
+                    pending_ws = ""
+                return
+
+
             # fractions
-            if isinstance(n, tuple) and len(n) == 3 and n[0] == "FRAC":
+            elif isinstance(n, tuple) and len(n) == 3 and n[0] == "FRAC":
                 numer_str, denom_val = n[1], n[2]
                 num = f"{numer_str}/{denom_val}"
                 out.append(
@@ -1193,7 +1239,8 @@ def digitize(
     )
 
     # multiplication: "<num> times <num>" or "<num> multiplied by <num>" -> "<num>*<num>"
-    num_atom = r"[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?"
+    num_atom = r"(?:pi|[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
+
 
     s = re.sub(
         rf"\b({num_atom})\s+(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)s?(?: (?:by|of))?\s+({num_atom})\b",
@@ -1213,6 +1260,13 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
+
+    # implicit multiplication: "5 pi" -> "5*pi"
+    s = re.sub(rf"\b(\d+(?:\.\d+)?)\s*pi\b", rf"\1{mult}pi", s, flags=re.IGNORECASE)
+
+    # allow "pi 5" -> "pi*5" (optional, but helps)
+    s = re.sub(rf"\bpi\s+(\d+(?:\.\d+)?)\b", rf"pi{mult}\1", s, flags=re.IGNORECASE)
+
 
 
     def _frac_exponent_to_ordinal(m: re.Match) -> str:
@@ -1421,6 +1475,19 @@ def digitize(
 
 
 
+PI_DECIMAL = "3.14159265358979323846264338327950288419716939937510"
+
+def _pi_for_res(res: int | None) -> str:
+    # Use guard digits so later rounding is stable.
+    # If res is None, default to ~50 digits.
+    guard = 25
+    if res is None:
+        return PI_DECIMAL
+    # +2 because "3." counts
+    digits = min(len(PI_DECIMAL), res + guard + 2)
+    return PI_DECIMAL[:digits]
+
+
 def _has_real_math(expr: str) -> bool:
     """
     True iff the expression contains at least TWO numbers and at least one binary operator.
@@ -1438,6 +1505,9 @@ def _has_real_math(expr: str) -> bool:
     for n in ast.walk(node):
         if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
             has_binop = True
+        # treat `pi` as a numeric constant
+        if isinstance(n, ast.Name) and n.id.lower() == "pi":
+            nums += 1
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
             nums += 1
         # optional: Python <3.8
@@ -1627,6 +1697,11 @@ def _safe_eval_expr(expr: str, eval_fractions: bool = False, res: int = 3) -> Fr
     returning an EXACT Fraction. Non-integer exponents are rejected
     (so we don't accidentally introduce irrationals / floats).
     """
+    # Replace pi with a decimal literal so our Fraction rewrite can handle it.
+    # Deterministic: uses PI_DECIMAL prefix with guard digits.
+    pi_lit = _pi_for_res(res if eval_fractions else None)
+    expr = re.sub(r"\bpi\b", pi_lit, expr, flags=re.IGNORECASE)
+
     expr2 = _rewrite_decimal_literals(expr)
     node = ast.parse(expr2, mode="eval")
 
@@ -1699,6 +1774,20 @@ def _is_terminating_decimal(d: int) -> bool:
         d //= 5
     return d == 1
 
+def _pi_decimal_str(res: int | None) -> str:
+    # res=None => full PI_DECIMAL constant
+    if res is None:
+        return PI_DECIMAL
+    if res <= 0:
+        return "3"
+    with localcontext() as ctx:
+        ctx.prec = max(60, res + 25)
+        q = Decimal("1").scaleb(-res)  # 10^-res
+        d = Decimal(PI_DECIMAL).quantize(q, rounding=ROUND_HALF_UP)
+        s = format(d, "f").rstrip("0").rstrip(".")
+        return s
+
+
 def simple_eval(
     s: str,
     power="**",
@@ -1711,7 +1800,7 @@ def simple_eval(
 ) -> str:
     s = s.replace(power, "**").replace(mult, "*").replace(div, "/")
 
-    expr_rx = re.compile(r"(?<!\S)[0-9\(\)\.\s\+\-\*/]+(?!\S)")
+    expr_rx = re.compile(r"(?<!\S)[0-9\(\)\.\s\+\-\*/pPiI]+(?!\S)")
     for m in reversed(list(expr_rx.finditer(s))):
         expr = m.group(0)
         if not _has_real_math(expr):
