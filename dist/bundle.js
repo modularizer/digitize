@@ -642,8 +642,8 @@ var DigitizeDemo = (() => {
       s = s.replace(/\b(the)\s+(second)\s+(after|before|between|when)\b/gi, (_m, g1, _g2, g3) => `${g1} ${SEC_SENTINEL} ${g3}`);
     }
     if (config.replaceMultipliers) {
-      const suffixMultipliers = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15 };
-      s = s.replace(/(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([KMGTP])(?=[^A-Za-z0-9]|$)/g, (_m, n1, suf) => {
+      const suffixMultipliers = { k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15 };
+      s = s.replace(/(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([kKMGTP])(?=[^A-Za-z0-9]|$)/g, (_m, n1, suf) => {
         const value = Math.trunc(parseFloat(n1) * suffixMultipliers[suf]);
         const nFmt = config.useCommas ? value.toLocaleString("en-US") : String(value);
         return fmtMultipliers.replace("%n", nFmt).replace("%m", suf).replace("%i", `${n1}${suf}`);
@@ -1316,6 +1316,7 @@ var DigitizeDemo = (() => {
       );
     }
     s = s.replace(new RegExp(String.raw`\b(square)\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/2)`);
+    s = s.replace(new RegExp(String.raw`\b(sqrt)\s+(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/2)`);
     s = s.replace(new RegExp(String.raw`\b(cube)\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/3)`);
     s = s.replace(new RegExp(String.raw`\b(?:the\s+)?(${numAtom2})(?:st|nd|rd|th)?\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/$1)`);
     s = s.replace(new RegExp(String.raw`\b(${numAtomSci})\s*e\s*([+-]?\d+)\b`, "gi"), "$1e$2");

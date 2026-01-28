@@ -860,8 +860,8 @@ export function digitize(
 
   // suffix multipliers K/M/G/T/P (capital only)
   if (config.replaceMultipliers) {
-    const suffixMultipliers: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15 };
-    s = s.replace(/(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([KMGTP])(?=[^A-Za-z0-9]|$)/g, (_m, n1, suf) => {
+    const suffixMultipliers: Record<string, number> = { k: 1e3, K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15 };
+    s = s.replace(/(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([kKMGTP])(?=[^A-Za-z0-9]|$)/g, (_m, n1, suf) => {
       const value = Math.trunc(parseFloat(n1) * suffixMultipliers[suf]);
       const nFmt = config.useCommas ? value.toLocaleString("en-US") : String(value);
       return (fmtMultipliers as string)
@@ -877,10 +877,15 @@ export function digitize(
     [/baker's dozens?/gi, 13],
     [/pairs?(?: of)/gi, 2],
   ];
-  for (const [rx, v] of known) {
+
+
+
+  known
+  .sort((a, b) => b[0].source.length - a[0].source.length)
+  .forEach(([rx, v]) => {
     s = s.replace(new RegExp(`\\ba ${rx.source}\\b`, "gi"), String(v));
     s = s.replace(new RegExp(`\\b${rx.source}\\b`, "gi"), `set of ${v}`);
-  }
+  });
 
   const n019 = ["zero","one","two","three","four","five","six","seven","eight","nine","ten","eleven","twelve","thirteen","fourteen","fifteen","sixteen","seventeen","eighteen","nineteen"];
   const digitWordToDigit: Record<string, string> = { o:"0", oh:"0", zero:"0", one:"1", two:"2", three:"3", four:"4", five:"5", six:"6", seven:"7", eight:"8", nine:"9" };

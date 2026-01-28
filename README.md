@@ -1,5 +1,7 @@
 # digitize
-A natural language number string normalizer
+A natural language number string normalizer for Python and Typescript.
+
+
 
 ## Install
 ```bash
