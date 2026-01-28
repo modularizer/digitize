@@ -55,6 +55,9 @@ class DigitizeParams:
     do_simple_evals: bool = _sentinel
     do_fraction_evals: bool = _sentinel
 
+
+    breaks: Iterable[str] = _sentinel
+
     def non_sentinels(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not _sentinel}
 
@@ -100,6 +103,7 @@ default = DigitizeParams(
         res=None,
         do_simple_evals=True,
         do_fraction_evals=True,
+        breaks=()
     )
 
 
@@ -190,7 +194,8 @@ def digitize(
         combine_add: bool = _sentinel,
         res: int = _sentinel,
         do_simple_evals: bool = _sentinel,
-        do_fraction_evals: bool = _sentinel
+        do_fraction_evals: bool = _sentinel,
+        breaks: str | Iterable[str] = _sentinel
 
 ) -> str:
     params = DigitizeParams(
@@ -215,7 +220,8 @@ def digitize(
         combine_add=combine_add,
         res=res,
         do_simple_evals=do_simple_evals,
-        do_fraction_evals=do_fraction_evals
+        do_fraction_evals=do_fraction_evals,
+        breaks=breaks
     )
     defaults = config if isinstance(config, DigitizeParams) else getattr(modes, config)
     config = DigitizeParams(**{**defaults.non_sentinels(), **params.non_sentinels()})
@@ -224,26 +230,17 @@ def digitize(
     fmt=config.fmt
     replace_multipliers = config.replace_multipliers
     fmt_multipliers = config.fmt_multipliers
-
-
-    # Ordinals:
     support_ordinals = config.support_ordinals
     fmt_ordinal=config.fmt_ordinal     # one hundred seventy-second -> 172nd
-
-    # reps / "time(s)":
     rep_signifiers = config.rep_signifiers
     support_reps= config.support_reps
     fmt_rep=config.fmt_rep      # default "%nx"    -> 3x   (for "3 times", "twice")
     fmt_nth_time =config.fmt_nth_time    # default "%n%ox"  -> 500th time (for "500th time")
     rep_fmt= config.rep_fmt
     rep_fmt_plural = config.rep_fmt_plural
-
     attempt_to_differentiate_seconds = config.attempt_to_differentiate_seconds
-
     literal_fmt = config.literal_fmt
-    
     support_roman = config.support_roman
-    
     parse_signs = config.parse_signs
     mult = config.mult
     div = config.div
@@ -252,8 +249,34 @@ def digitize(
     res = config.res
     do_simple_evals = config.do_simple_evals
     do_fraction_evals = config.do_fraction_evals
+    breaks = config.breaks
+    #__________________________________________________
+    if isinstance(breaks, str):
+        breaks = (breaks,)
 
+    if not breaks:
+        chunks = [s]
+        seps = []
+    else:
+        # split and keep delimiters
+        pattern = f"({'|'.join(map(re.escape, breaks))})"
+        parts = re.split(pattern, s)
 
+        chunks = parts[::2]   # text
+        seps   = parts[1::2]  # separators
+
+    if len(chunks) > 1:
+        processed = [digitize(c, config=config) for c in chunks]
+
+        out = []
+        for i, c in enumerate(processed):
+            out.append(c)
+            if i < len(seps):
+                out.append(seps[i])
+
+        return "".join(out)
+
+    # _________________________________________
     if not literal_fmt:
         fmt = re.sub(r"\d+", "%n", fmt)
     if fmt_multipliers is None:
@@ -1418,7 +1441,7 @@ def _has_real_math(expr: str) -> bool:
         if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
             nums += 1
         # optional: Python <3.8
-        if hasattr(ast, "Num") and isinstance(n, ast.Num):  # type: ignore[attr-defined]
+        if hasattr(ast, "Constant") and isinstance(n, ast.Constant):  # type: ignore[attr-defined]
             nums += 1
 
     return has_binop and nums >= 2

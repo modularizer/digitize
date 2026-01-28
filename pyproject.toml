@@ -1,5 +1,5 @@
 [project]
-name = "digitize"
+name = "modularizer-digitize"
 version = "0.1.0"
 description = "A natural language numerical string preprocessor"
 authors = [
