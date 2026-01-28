@@ -5,7 +5,7 @@
    - “Exact” math evaluation uses BigInt Fractions (no float rounding drift).
    - Fractional exponents:
        * exact rational results are supported when they stay rational (e.g. 32^(1/5) => 2)
-       * if the power would be irrational, we *leave it unevaluated* (like your Python when eval_fractions=false)
+       * if the power would be irrational, we *leave it unevaluated* (like your Python when evalFractions=false)
        * I did NOT port the Decimal/Newton “approx irrational powers to N decimals” path.
          If you want that, tell me and I’ll add a deterministic decimal implementation.
 
@@ -29,40 +29,40 @@ type Maybe<T> = T | typeof SENTINEL;
 interface DigitizeParams {
   description: Maybe<string>;
   config: Maybe<DigitizeMode | any>;
-  use_commas: Maybe<boolean>;
+  useCommas: Maybe<boolean>;
   fmt: Maybe<string>;
 
-  replace_multipliers: Maybe<boolean>;
-  fmt_multipliers: Maybe<string | null>;
+  replaceMultipliers: Maybe<boolean>;
+  fmtMultipliers: Maybe<string | null>;
 
   // Ordinals
-  support_ordinals: Maybe<boolean>;
-  fmt_ordinal: Maybe<string | null>;
+  supportOrdinals: Maybe<boolean>;
+  fmtOrdinal: Maybe<string | null>;
 
   // reps
-  rep_signifiers: Maybe<RepSignifier>;
-  support_reps: Maybe<boolean>;
-  fmt_rep: Maybe<string | null>;
-  fmt_nth_time: Maybe<string | null>;
-  rep_fmt: Maybe<string>;
-  rep_fmt_plural: Maybe<boolean>;
+  repSignifiers: Maybe<RepSignifier>;
+  supportReps: Maybe<boolean>;
+  fmtRep: Maybe<string | null>;
+  fmtNthTime: Maybe<string | null>;
+  repFmt: Maybe<string>;
+  repFmtPlural: Maybe<boolean>;
 
-  attempt_to_differentiate_seconds: Maybe<boolean>;
+  attemptToDifferentiateSeconds: Maybe<boolean>;
 
-  literal_fmt: Maybe<boolean | null>;
+  literalFmt: Maybe<boolean | null>;
 
-  support_roman: Maybe<boolean>;
+  supportRoman: Maybe<boolean>;
 
-  parse_signs: Maybe<boolean>;
+  parseSigns: Maybe<boolean>;
 
   power: Maybe<string>;
   mult: Maybe<string>;
   div: Maybe<string>;
 
-  combine_add: Maybe<boolean>;
+  combineAdd: Maybe<boolean>;
   res: Maybe<number | null>;
-  do_simple_evals: Maybe<boolean>;
-  do_fraction_evals: Maybe<boolean>;
+  doSimpleEvals: Maybe<boolean>;
+  doFractionEvals: Maybe<boolean>;
 
   breaks: Maybe<Iterable<string> | string>;
 }
@@ -526,16 +526,16 @@ function simpleEval(
     power = "**",
     mult = "*",
     div = "/",
-    eval_fractions = false,
+    evalFractions = false,
     res = 3,
-    max_decimal_digits = 2000,
+    maxDecimalDigits = 2000,
   }: {
     power?: string;
     mult?: string;
     div?: string;
-    eval_fractions?: boolean;
+    evalFractions?: boolean;
     res?: number;
-    max_decimal_digits?: number;
+    maxDecimalDigits?: number;
   } = {}
 ): string {
   // normalize to internal operators
@@ -552,15 +552,15 @@ function simpleEval(
 
     let val: Fraction;
     try {
-      val = safeEvalExpr(expr.trim(), eval_fractions, res);
+      val = safeEvalExpr(expr.trim(), evalFractions, res);
     } catch {
       continue;
     }
 
     let out = fractionToExactString(val);
 
-    // If eval_fractions is true and result is n/d, optionally round to `res` decimals deterministically
-    if (eval_fractions && out.includes("/") && typeof res === "number" && res <= max_decimal_digits) {
+    // If evalFractions is true and result is n/d, optionally round to `res` decimals deterministically
+    if (evalFractions && out.includes("/") && typeof res === "number" && res <= maxDecimalDigits) {
       // integer rounding half-up using bigint arithmetic
       const n = val.n;
       const d = val.d;
@@ -614,36 +614,36 @@ function simpleEval(
 const defaultParams: DigitizeParams = {
   description: "Tries to respect human language. Pretty and semi-parseable",
   config: "default",
-  use_commas: false,
+  useCommas: false,
   fmt: "%n",
-  replace_multipliers: true,
-  fmt_multipliers: null,
+  replaceMultipliers: true,
+  fmtMultipliers: null,
 
-  support_ordinals: true,
-  fmt_ordinal: null,
+  supportOrdinals: true,
+  fmtOrdinal: null,
 
-  rep_signifiers: COMPLEX_REP_PATTERN,
-  support_reps: true,
-  fmt_rep: null,
-  fmt_nth_time: null,
-  rep_fmt: "time",
-  rep_fmt_plural: true,
+  repSignifiers: COMPLEX_REP_PATTERN,
+  supportReps: true,
+  fmtRep: null,
+  fmtNthTime: null,
+  repFmt: "time",
+  repFmtPlural: true,
 
-  attempt_to_differentiate_seconds: true,
+  attemptToDifferentiateSeconds: true,
 
-  literal_fmt: false,
+  literalFmt: false,
 
-  support_roman: false,
+  supportRoman: false,
 
-  parse_signs: true,
+  parseSigns: true,
   power: "**",
   mult: "*",
   div: "/",
 
-  combine_add: true,
+  combineAdd: true,
   res: null,
-  do_simple_evals: true,
-  do_fraction_evals: true,
+  doSimpleEvals: true,
+  doFractionEvals: true,
 
   breaks: [],
 };
@@ -652,44 +652,44 @@ const defaultParams: DigitizeParams = {
 const modes = {
   default: defaultParams,
   nomath: replaceParams(defaultParams, {
-    combine_add: false,
-    do_simple_evals: false,
-    do_fraction_evals: false,
+    combineAdd: false,
+    doSimpleEvals: false,
+    doFractionEvals: false,
   }),
   simplemath: replaceParams(defaultParams, {
-    combine_add: true,
-    do_simple_evals: true,
+    combineAdd: true,
+    doSimpleEvals: true,
     res: null,
-    do_fraction_evals: false,
+    doFractionEvals: false,
   }),
   token: replaceParams(defaultParams, {
     description: "ugly but parseable",
     config: "token",
     fmt: "[NUM=%n,OG=%i]",
-    fmt_multipliers: "[NUM=%n,MULT=%m,OG=%i]",
-    fmt_ordinal: "[NUM=%n,ORD=%o,OG=%i]",
-    fmt_rep: "[NUM=%n,REP=%r,OG=%i]",
-    fmt_nth_time: "[NUM=%n,ORD=%o,REP=%r,OG=%i]",
+    fmtMultipliers: "[NUM=%n,MULT=%m,OG=%i]",
+    fmtOrdinal: "[NUM=%n,ORD=%o,OG=%i]",
+    fmtRep: "[NUM=%n,REP=%r,OG=%i]",
+    fmtNthTime: "[NUM=%n,ORD=%o,REP=%r,OG=%i]",
   }),
   strip: replaceParams(defaultParams, {
     description: "simplifies the string a lot but very lossy of n-th n-th times, etc",
     config: "strip",
-    rep_signifiers: COMPLEX_REP_PATTERN,
-    fmt_ordinal: "%n",
-    fmt_rep: "%n",
-    fmt_nth_time: "%n",
+    repSignifiers: COMPLEX_REP_PATTERN,
+    fmtOrdinal: "%n",
+    fmtRep: "%n",
+    fmtNthTime: "%n",
   }),
   nums: replaceParams(defaultParams, {
     description: "do not even look for once, n times, etc.",
     config: "num",
-    support_reps: false,
-    attempt_to_differentiate_seconds: false,
+    supportReps: false,
+    attemptToDifferentiateSeconds: false,
   }),
   norm: replaceParams(defaultParams, {
     description: "Not grammatically correct but more parseable. e.g. 1-th, 2-th, 3-th time, etc",
     config: "norm",
-    fmt_ordinal: "%n-th",
-    fmt_rep: "%n-th time",
+    fmtOrdinal: "%n-th",
+    fmtRep: "%n-th time",
   }),
 };
 
@@ -736,29 +736,29 @@ export function digitize(
   const params: DigitizeParams = {
     description: SENTINEL,
     config: SENTINEL,
-    use_commas: opts.use_commas ?? SENTINEL,
+    useCommas: opts.useCommas ?? SENTINEL,
     fmt: opts.fmt ?? SENTINEL,
-    replace_multipliers: opts.replace_multipliers ?? SENTINEL,
-    fmt_multipliers: opts.fmt_multipliers ?? SENTINEL,
-    support_ordinals: opts.support_ordinals ?? SENTINEL,
-    fmt_ordinal: opts.fmt_ordinal ?? SENTINEL,
-    rep_signifiers: opts.rep_signifiers ?? SENTINEL,
-    support_reps: opts.support_reps ?? SENTINEL,
-    fmt_rep: opts.fmt_rep ?? SENTINEL,
-    fmt_nth_time: opts.fmt_nth_time ?? SENTINEL,
-    rep_fmt: opts.rep_fmt ?? SENTINEL,
-    rep_fmt_plural: opts.rep_fmt_plural ?? SENTINEL,
-    attempt_to_differentiate_seconds: opts.attempt_to_differentiate_seconds ?? SENTINEL,
-    literal_fmt: opts.literal_fmt ?? SENTINEL,
-    support_roman: opts.support_roman ?? SENTINEL,
-    parse_signs: opts.parse_signs ?? SENTINEL,
+    replaceMultipliers: opts.replaceMultipliers ?? SENTINEL,
+    fmtMultipliers: opts.fmtMultipliers ?? SENTINEL,
+    supportOrdinals: opts.supportOrdinals ?? SENTINEL,
+    fmtOrdinal: opts.fmtOrdinal ?? SENTINEL,
+    repSignifiers: opts.repSignifiers ?? SENTINEL,
+    supportReps: opts.supportReps ?? SENTINEL,
+    fmtRep: opts.fmtRep ?? SENTINEL,
+    fmtNthTime: opts.fmtNthTime ?? SENTINEL,
+    repFmt: opts.repFmt ?? SENTINEL,
+    repFmtPlural: opts.repFmtPlural ?? SENTINEL,
+    attemptToDifferentiateSeconds: opts.attemptToDifferentiateSeconds ?? SENTINEL,
+    literalFmt: opts.literalFmt ?? SENTINEL,
+    supportRoman: opts.supportRoman ?? SENTINEL,
+    parseSigns: opts.parseSigns ?? SENTINEL,
     power: opts.power ?? SENTINEL,
     mult: opts.mult ?? SENTINEL,
     div: opts.div ?? SENTINEL,
-    combine_add: opts.combine_add ?? SENTINEL,
+    combineAdd: opts.combineAdd ?? SENTINEL,
     res: opts.res ?? SENTINEL,
-    do_simple_evals: opts.do_simple_evals ?? SENTINEL,
-    do_fraction_evals: opts.do_fraction_evals ?? SENTINEL,
+    doSimpleEvals: opts.doSimpleEvals ?? SENTINEL,
+    doFractionEvals: opts.doFractionEvals ?? SENTINEL,
     breaks: (opts as any).breaks ?? SENTINEL,
   };
 
@@ -792,12 +792,12 @@ export function digitize(
 
   // formatting normalization like python
   let fmt: string = config.fmt;
-  let fmtMultipliers: string | null = config.fmt_multipliers;
-  let fmtOrdinal: string | null = config.fmt_ordinal;
-  let fmtRep: string | null = config.fmt_rep;
-  let fmtNthTime: string | null = config.fmt_nth_time;
+  let fmtMultipliers: string | null = config.fmtMultipliers;
+  let fmtOrdinal: string | null = config.fmtOrdinal;
+  let fmtRep: string | null = config.fmtRep;
+  let fmtNthTime: string | null = config.fmtNthTime;
 
-  const literalFmt: boolean | null = config.literal_fmt;
+  const literalFmt: boolean | null = config.literalFmt;
 
   if (!literalFmt) fmt = fmt.replace(/\d+/g, "%n");
   if (fmtMultipliers == null) fmtMultipliers = fmt;
@@ -807,21 +807,21 @@ export function digitize(
   if (!literalFmt) fmtOrdinal = fmtOrdinal.replace(/\d+/g, "%n");
 
   if (fmtRep == null) {
-    if (config.rep_fmt === "x") fmtRep = fmt.replace("%n", "%nx");
+    if (config.repFmt === "x") fmtRep = fmt.replace("%n", "%nx");
     else {
-      const repFmt: string = config.rep_fmt;
-      fmtRep = fmt.replace("%n", config.rep_fmt_plural ? `%n ${repFmt}%s` : `%n ${repFmt}`);
+      const repFmt: string = config.repFmt;
+      fmtRep = fmt.replace("%n", config.repFmtPlural ? `%n ${repFmt}%s` : `%n ${repFmt}`);
     }
   }
   if (!literalFmt) fmtRep = fmtRep.replace(/\d+/g, "%n");
 
   if (fmtNthTime == null) {
-    // similar to python: re.sub("%n(%o)?", "%n\1 time", fmt_ordinal)
-    fmtNthTime = (fmtOrdinal ?? fmt).replace(/%n(%o)?/g, `%n$1 ${config.rep_fmt}`);
+    // similar to python: re.sub("%n(%o)?", "%n\1 time", fmtOrdinal)
+    fmtNthTime = (fmtOrdinal ?? fmt).replace(/%n(%o)?/g, `%n$1 ${config.repFmt}`);
   }
   if (!literalFmt) fmtNthTime = fmtNthTime.replace(/\d+/g, "%n");
 
-  if (config.parse_signs && !literalFmt) {
+  if (config.parseSigns && !literalFmt) {
     const addP = (x: string) => x.replace(/%n/g, "%p%n");
     fmt = addP(fmt);
     fmtMultipliers = addP(fmtMultipliers);
@@ -835,9 +835,9 @@ export function digitize(
   const repeatMap = new Map<string, string>();
 
   // reps sentinel replacement
-  if (config.support_reps && config.rep_signifiers) {
+  if (config.supportReps && config.repSignifiers) {
     let repRx: RegExp;
-    const repSignifiers = config.rep_signifiers as RepSignifier;
+    const repSignifiers = config.repSignifiers as RepSignifier;
 
     if (typeof repSignifiers === "string") repRx = new RegExp(String.raw`(?i)\b(${repSignifiers})\b`.replace("(?i)", ""), "gi");
     else if (repSignifiers instanceof RegExp) repRx = repSignifiers;
@@ -853,17 +853,17 @@ export function digitize(
     });
   }
 
-  if (config.attempt_to_differentiate_seconds) {
+  if (config.attemptToDifferentiateSeconds) {
     s = s.replace(/\b(a|one|per|each)\s+(second)\b/gi, (_m, g1) => `${g1} ${SEC_SENTINEL}`);
     s = s.replace(/\b(the)\s+(second)\s+(after|before|between|when)\b/gi, (_m, g1, _g2, g3) => `${g1} ${SEC_SENTINEL} ${g3}`);
   }
 
   // suffix multipliers K/M/G/T/P (capital only)
-  if (config.replace_multipliers) {
+  if (config.replaceMultipliers) {
     const suffixMultipliers: Record<string, number> = { K: 1e3, M: 1e6, G: 1e9, T: 1e12, P: 1e15 };
     s = s.replace(/(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([KMGTP])(?=[^A-Za-z0-9]|$)/g, (_m, n1, suf) => {
       const value = Math.trunc(parseFloat(n1) * suffixMultipliers[suf]);
-      const nFmt = config.use_commas ? value.toLocaleString("en-US") : String(value);
+      const nFmt = config.useCommas ? value.toLocaleString("en-US") : String(value);
       return (fmtMultipliers as string)
         .replace("%n", nFmt)
         .replace("%m", suf)
@@ -911,7 +911,7 @@ export function digitize(
     quadrillionth: 1e15, quadrillionths: 1e15,
   };
 
-  if (config.support_ordinals) {
+  if (config.supportOrdinals) {
     Object.assign(ordinalWordToNum, {
       first:1, second:2, third:3, fourth:4, fifth:5,
       sixth:6, seventh:7, eighth:8, ninth:9, tenth:10,
@@ -941,12 +941,12 @@ export function digitize(
     if (t === "oh" || t === "o") return true;
     if (t === "pi") return true;
     if (t in fractionDenWord) return true;
-    if (config.support_reps && t in repeatWordToNum) return true;
-    if (config.support_ordinals && /^\d+(st|nd|rd|th)$/i.test(t)) return true;
+    if (config.supportReps && t in repeatWordToNum) return true;
+    if (config.supportOrdinals && /^\d+(st|nd|rd|th)$/i.test(t)) return true;
     if (/^\d+$/.test(t) || t in wordToNum || t === "hundred" || t in magnitudeValue) return true;
-    if (config.support_ordinals && (t in ordinalWordToNum || t in ordinalMagnitudeExact)) return true;
-    if (config.support_reps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(tok)) return true;
-    if (config.support_roman && ROMAN_PATTERN.test(tok)) return true;
+    if (config.supportOrdinals && (t in ordinalWordToNum || t in ordinalMagnitudeExact)) return true;
+    if (config.supportReps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(tok)) return true;
+    if (config.supportRoman && ROMAN_PATTERN.test(tok)) return true;
     return false;
   }
 
@@ -966,7 +966,7 @@ export function digitize(
     if (normWords.length && normWords[normWords.length - 1] === "and") return null;
 
     // once/twice/thrice
-    if (config.support_reps && normWords.length) {
+    if (config.supportReps && normWords.length) {
       const w0 = normWords[0];
       if (w0 in repeatWordToNum) {
         if (normWords.length === 1) return { kind: "int", n: repeatWordToNum[w0], isOrd: false, isTime: true };
@@ -976,7 +976,7 @@ export function digitize(
 
     let isTime = false;
     let core = normWords;
-    if (config.support_reps && core.length && isRepeatTail(core[core.length - 1])) {
+    if (config.supportReps && core.length && isRepeatTail(core[core.length - 1])) {
       isTime = true;
       core = core.slice(0, -1);
     }
@@ -1123,7 +1123,7 @@ if (core.length === 2 && core[1] === "pi") {
           if (w === "and") continue;
           if (w === "oh" || w === "o") { saw = true; continue; }
 
-          if (config.support_ordinals) {
+          if (config.supportOrdinals) {
             if (/^\d+(st|nd|rd|th)$/i.test(w)) return null;
             if (w in ordinalWordToNum || w in ordinalMagnitudeExact) return null;
           }
@@ -1149,7 +1149,7 @@ if (core.length === 2 && core[1] === "pi") {
     for (const w of core) {
       if (w === "and") continue;
 
-      if (config.support_ordinals) {
+      if (config.supportOrdinals) {
         const mo = w.match(/^(\d+)(st|nd|rd|th)$/i);
         if (mo) {
           current += parseInt(mo[1], 10);
@@ -1161,11 +1161,11 @@ if (core.length === 2 && core[1] === "pi") {
 
       if (/^\d+$/.test(w)) { current += parseInt(w, 10); saw = true; continue; }
       if (w in wordToNum) { current += wordToNum[w]; saw = true; continue; }
-      if (config.support_ordinals && w in ordinalWordToNum) { current += ordinalWordToNum[w]; saw = true; isOrd = true; continue; }
+      if (config.supportOrdinals && w in ordinalWordToNum) { current += ordinalWordToNum[w]; saw = true; isOrd = true; continue; }
 
       if (w === "hundred") { if (!saw) return null; current *= 100; continue; }
 
-      if (config.support_ordinals && w in ordinalMagnitudeExact) {
+      if (config.supportOrdinals && w in ordinalMagnitudeExact) {
         if (!saw) { current = ordinalMagnitudeExact[w]; saw = true; }
         else current *= ordinalMagnitudeExact[w];
         isOrd = true;
@@ -1174,7 +1174,7 @@ if (core.length === 2 && core[1] === "pi") {
 
       if (w in magnitudeValue) { if (!saw) return null; total += current * magnitudeValue[w]; current = 0; continue; }
 
-      if (config.support_roman && ROMAN_PATTERN.test(w)) { current += romanToInt(w); saw = true; continue; }
+      if (config.supportRoman && ROMAN_PATTERN.test(w)) { current += romanToInt(w); saw = true; continue; }
 
       return null;
     }
@@ -1227,7 +1227,7 @@ if (core.length === 2 && core[1] === "pi") {
     const nxt = nextTok.toLowerCase();
     if (tensWords.includes(p)) {
       if (/^\d+$/.test(nxt) || nxt in wordToNum) return true;
-      if (config.support_ordinals && nxt in ordinalWordToNum) return true;
+      if (config.supportOrdinals && nxt in ordinalWordToNum) return true;
     }
     return false;
   };
@@ -1243,10 +1243,10 @@ if (core.length === 2 && core[1] === "pi") {
       if (w in fractionDenWord) { hasConvertible = true; break; }
       if (/^\d+$/.test(w)) continue;
       if (w in wordToNum || w === "hundred" || w in magnitudeValue) { hasConvertible = true; break; }
-      if (config.support_ordinals && (w in ordinalWordToNum || w in ordinalMagnitudeExact || /^\d+(st|nd|rd|th)$/i.test(w))) { hasConvertible = true; break; }
-      if (config.support_reps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(w)) { hasConvertible = true; break; }
-      if (config.support_reps && w in repeatWordToNum) { hasConvertible = true; break; }
-      if (config.support_roman && ROMAN_PATTERN.test(w)) { hasConvertible = true; break; }
+      if (config.supportOrdinals && (w in ordinalWordToNum || w in ordinalMagnitudeExact || /^\d+(st|nd|rd|th)$/i.test(w))) { hasConvertible = true; break; }
+      if (config.supportReps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(w)) { hasConvertible = true; break; }
+      if (config.supportReps && w in repeatWordToNum) { hasConvertible = true; break; }
+      if (config.supportRoman && ROMAN_PATTERN.test(w)) { hasConvertible = true; break; }
     }
 
     if (!hasConvertible) {
@@ -1262,7 +1262,7 @@ if (core.length === 2 && core[1] === "pi") {
       out.push(raw.join(""));
     } else {
       const iText = raw.join("");
-      const useCommas: boolean = config.use_commas;
+      const useCommas: boolean = config.useCommas;
 
         if (parsed.kind === "pi") {
           const coef = parsed.coef;
@@ -1312,8 +1312,8 @@ if (core.length === 2 && core[1] === "pi") {
           }
         }
 
-        if (parsed.isTime && config.support_reps) {
-          if (parsed.isOrd && config.support_ordinals) {
+        if (parsed.isTime && config.supportReps) {
+          if (parsed.isOrd && config.supportOrdinals) {
             const suf = ordinalSuffix(n);
             out.push(
               (fmtNthTime as string)
@@ -1333,7 +1333,7 @@ if (core.length === 2 && core[1] === "pi") {
             );
           }
         } else {
-          if (parsed.isOrd && config.support_ordinals) {
+          if (parsed.isOrd && config.supportOrdinals) {
             const suf = ordinalSuffix(n);
             out.push(
               (fmtOrdinal as string)
@@ -1387,7 +1387,7 @@ if (core.length === 2 && core[1] === "pi") {
       }
 
       // rep sentinel
-      if (config.support_reps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(t)) {
+      if (config.supportReps && new RegExp(`^${REPEAT_PREFIX}\\d+_$`, "i").test(t)) {
         const nxt = nextNonSpace(i);
         if (nxt && isNumericAtom(nxt)) {
           flushPhrase();
@@ -1474,7 +1474,7 @@ if (core.length === 2 && core[1] === "pi") {
 
   s = out.join("");
 
-  if (config.attempt_to_differentiate_seconds) s = s.split(SEC_SENTINEL).join("second");
+  if (config.attemptToDifferentiateSeconds) s = s.split(SEC_SENTINEL).join("second");
 
   if (repeatMap.size) {
     const repRx = new RegExp(`${REPEAT_PREFIX}\\d+_`, "gi");
@@ -1483,7 +1483,7 @@ if (core.length === 2 && core[1] === "pi") {
 
   s = s.replace(/%p/g, "");
 
-  if (config.parse_signs) {
+  if (config.parseSigns) {
     const numRx = String.raw`(\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)`;
     s = s.replace(new RegExp(String.raw`\b(neg|negative|minus)\s+${numRx}\b`, "gi"), "-$2");
     s = s.replace(new RegExp(String.raw`\b(pos|positive|plus)\s+${numRx}\b`, "gi"), "+$2");
@@ -1535,7 +1535,7 @@ if (core.length === 2 && core[1] === "pi") {
   s = s.replace(new RegExp(String.raw`\b(${numAtomSci})\s*(?:\*|x|×)\s*${tenPow}\b`, "gi"), (_m, a, b) => `${a}${mult}(10${power}${b})`);
 
   // mixed numbers "1 and 1/2" -> evaluate (terminating decimals only if res=null-ish)
-  if (config.combine_add !== false) {
+  if (config.combineAdd !== false) {
     s = s.replace(/\b([+-]?\d+(?:\.\d+)?)\s+and\s+([+-]?\d+(?:\.\d+)?)\/(\d+)\b/gi, (_m, wholeS, numS, denS) => {
       try {
         const whole = wholeS.includes(".") ? Fraction.fromDecimalString(wholeS) : new Fraction(BigInt(wholeS), 1n);
@@ -1554,18 +1554,18 @@ if (core.length === 2 && core[1] === "pi") {
     });
   }
 
-  if (config.do_simple_evals) {
+  if (config.doSimpleEvals) {
     s = simpleEval(s, {
       power,
       mult,
       div,
-      eval_fractions: !!config.do_fraction_evals,
+      evalFractions: !!config.doFractionEvals,
       res: typeof config.res === "number" ? config.res : 3,
     });
   }
 
 // ---- near the end of digitize(), right before `return s;` ----
-if (config.do_fraction_evals) {
+if (config.doFractionEvals) {
   const rr = typeof config.res === "number" ? config.res : 3;
   const piLit = piForRes(rr);
 

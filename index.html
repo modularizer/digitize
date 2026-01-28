@@ -55,9 +55,9 @@
 
       function run() {
         const mode = $("mode").value;
-        const use_commas = $("commas").checked;
-        const do_simple_evals = $("eval").checked;
-        const do_fraction_evals = $("fracEval").checked;
+        const useCommas = $("commas").checked;
+        const doSimpleEvals = $("eval").checked;
+        const doFractionEvals = $("fracEval").checked;
         const res = Number($("res").value);
 
         const input = $("in").value;
@@ -65,9 +65,9 @@
         // digitize is exposed on window by the bundler entry (see main.ts)
         const output = window.digitize(input, {
           config: mode,
-          use_commas,
-          do_simple_evals,
-          do_fraction_evals,
+          useCommas,
+          doSimpleEvals,
+          doFractionEvals,
           res,
           power: "**",
           mult: "*",
