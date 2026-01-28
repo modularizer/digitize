@@ -1,0 +1,22 @@
+[project]
+name = "digitize"
+version = "0.1.0"
+description = "A natural language numerical string preprocessor"
+authors = [
+    {name = "Torin Halsted", email = "modularizer@gmail.com"}
+]
+requires-python = ">=3.10"
+license = {text = "Unlicense"}
+dependencies = []
+
+[project.optional-dependencies]
+test = [
+]
+
+[project.scripts]
+digitize = "digitize:main"
+
+[tool.black]
+line-length = 100
+target-version = ['py310']
+

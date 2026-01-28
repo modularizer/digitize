@@ -1,0 +1,47 @@
+build/
+dist/
+*.egg-info/
+.eggs/
+
+# Environments
+.env
+.venv
+env/
+venv/
+.env.local
+.env.*.local
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+
+# IDEs
+.vscode/
+.idea/
+
+# Docker
+.dockerignore
+
+# Project Specific Patterns
+*untracked*
+*secret*
+
+
+# OS specific
+.DS_Store
+Thumbs.db
+
+data/
+
+
+venv
+.idea
+.claude
+.vscode
+
+
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
