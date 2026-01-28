@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>digitize demo</title>
+    <style>
+      body { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; margin: 24px; max-width: 900px; }
+      textarea { width: 100%; height: 120px; font-size: 14px; padding: 10px; }
+      .row { display: flex; gap: 12px; flex-wrap: wrap; margin: 12px 0; align-items: center; }
+      label { display: inline-flex; gap: 8px; align-items: center; }
+      input[type="number"] { width: 90px; padding: 6px; }
+      select, button { padding: 8px 10px; }
+      pre { background: #111; color: #eee; padding: 12px; border-radius: 10px; overflow: auto; }
+      .hint { opacity: 0.8; font-size: 13px; }
+    </style>
+  </head>
+  <body>
+    <h1>digitize demo</h1>
+
+    <textarea id="in">square root of five plus one and a half</textarea>
+
+    <div class="row">
+      <label>mode
+        <select id="mode">
+          <option value="default" selected>default</option>
+          <option value="token">token</option>
+          <option value="strip">strip</option>
+          <option value="num">num</option>
+          <option value="norm">norm</option>
+        </select>
+      </label>
+
+      <label><input id="commas" type="checkbox" /> use commas</label>
+      <label><input id="eval" type="checkbox" checked /> evaluate math</label>
+      <label><input id="fracEval" type="checkbox" checked /> eval fractional powers (exact decimals)</label>
+
+      <label>decimals
+        <input id="res" type="number" value="10" min="0" max="2000" />
+      </label>
+
+      <button id="run">Run</button>
+    </div>
+
+    <div class="hint">
+      Try: “two to the one hundred twenty-seventh power”, “Traffic hit 10K requests per second.”, “third time was the charm”
+    </div>
+
+    <h3>Output</h3>
+    <pre id="out"></pre>
+
+    <script src="./dist/bundle.js"></script>
+    <script>
+      const $ = (id) => document.getElementById(id);
+
+      function run() {
+        const mode = $("mode").value;
+        const use_commas = $("commas").checked;
+        const do_simple_evals = $("eval").checked;
+        const do_fraction_evals = $("fracEval").checked;
+        const res = Number($("res").value);
+
+        const input = $("in").value;
+
+        // digitize is exposed on window by the bundler entry (see main.ts)
+        const output = window.digitize(input, {
+          config: mode,
+          use_commas,
+          do_simple_evals,
+          do_fraction_evals,
+          res,
+          power: "**",
+          mult: "*",
+          div: "/",
+        });
+
+        $("out").textContent = output;
+      }
+
+      $("run").addEventListener("click", run);
+      $("in").addEventListener("input", () => {
+        // live-ish
+        clearTimeout(window.__t);
+        window.__t = setTimeout(run, 120);
+      });
+
+      run();
+    </script>
+  </body>
+</html>

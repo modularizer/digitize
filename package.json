@@ -1,0 +1,17 @@
+{
+  "name": "digitize",
+  "version": "1.0.0",
+  "description": "A natural language number string normalizer",
+  "main": "index.js",
+  "scripts": {
+    "build": "esbuild src/main.ts --bundle --outfile=dist/bundle.js --format=iife --global-name=DigitizeDemo",
+    "dev": "esbuild src/main.ts --bundle --outfile=dist/bundle.js --format=iife --sourcemap --servedir=. --watch"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "devDependencies": {
+    "esbuild": "^0.27.2",
+    "typescript": "^5.9.3"
+  }
+}
