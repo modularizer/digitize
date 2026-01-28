@@ -1525,6 +1525,7 @@ if (core.length === 2 && core[1] === "pi") {
 
   // roots -> power (1/n)
   s = s.replace(new RegExp(String.raw`\b(square)\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/2)`);
+  s = s.replace(new RegExp(String.raw`\b(sqrt)\s+(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/2)`);
   s = s.replace(new RegExp(String.raw`\b(cube)\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/3)`);
   s = s.replace(new RegExp(String.raw`\b(?:the\s+)?(${numAtom2})(?:st|nd|rd|th)?\s+root(?:\s+of)?\s+(${numAtom2})\b`, "gi"), `$2${power}(1/$1)`);
 
