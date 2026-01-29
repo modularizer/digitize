@@ -269,6 +269,7 @@ class Unit(UnitValue, UnitGrammar):
             n = 1 if x.group(3).startswith("a") else int(x.group(1))
             f = x.group(4)
             rest = x.group(5)
+            print(f"{n=}, {f=}, {rest=}")
             rm = re.match(r"(\S+)", rest.strip())
             fw = rm.group(1) if rm else ""
             rest2 = self.sub(rest, all_units)
@@ -287,8 +288,12 @@ class Unit(UnitValue, UnitGrammar):
                     f = f"{start + n}.{end}"
                 else:
                     f = str(n + int(f))
-
-                s = start + s + f + self.full_replacement.replace(r"\1", " ") + rest2
+                rep = self.full_replacement.replace(r"\1", " ")
+                if self.base and f != "1":
+                    k = self.key if isinstance(self.key, str) else self.key[0]
+                    p = self.plural if self.plural else guess_plural(k)
+                    rep = f" {p}"
+                s = start + s + f + rep + rest2
         if not self.base:
             s = re.sub(self.full_pattern, self.full_replacement, s)
         return s
@@ -308,7 +313,6 @@ class Unit(UnitValue, UnitGrammar):
             left = norm(m.group(1))
             right = norm(m.group(3))
             unit = m.group(2)
-            print("REP", left, right, unit)
 
             return f"({left} + {right}){unit}"
         # print(self.key, p, s)
@@ -1651,12 +1655,7 @@ def digitize(
     num_atom = r"(?:[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
 
 
-    s = re.sub(
-        rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
-        rf"\1{mult}\2",
-        s,
-        flags=re.IGNORECASE,
-    )
+
     s = re.sub(
         rf"({num_atom})\s\+({num_atom})",
         r"\1+\2",
@@ -1874,7 +1873,25 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
+    s = re.sub(
+        r"(\d+) and (\d+(?:\.|\/)\d+)",
+        rf"\1 + \2",
+        s,
+        flags=re.IGNORECASE,
+    )
 
+
+    if do_simple_evals:
+        # print("se", s)
+        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+        # print("postse", s)
+
+    s = re.sub(
+        rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
+        rf"\1{mult}\2",
+        s,
+        flags=re.IGNORECASE,
+    )
 
     if do_simple_evals:
         # print("se", s)
@@ -1883,7 +1900,6 @@ def digitize(
     # replace hanging
     s = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
     def merge_units(s, u):
-        # print(f"u", u)
         if isinstance(u, UnitGroup):
             s = u.base.base_merge(s)
         elif isinstance(u, Unit):
@@ -1892,13 +1908,23 @@ def digitize(
             for u2 in u:
                 s = merge_units(s, u2)
         return s
+    base_units = [u for u in all_units if u.base]
+    known_bu_keys = set()
+    for bu in base_units:
+        if isinstance(bu.key, str):
+            known_bu_keys.add(bu.key)
+        else:
+            for buk in bu.key:
+                known_bu_keys.add(buk)
 
-    s2 = merge_units(s, units)
-    if s2 != s:
-        s= s2
-        if do_simple_evals:
-            # print("se", s)
-            s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+    s = merge_units(s, base_units)
+    new_units = set(u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else "" for u in all_units)
+    new_units = [nu for nu in new_units if nu not in known_bu_keys]
+    more_bases = [Unit(k, base=True) for k in new_units]
+    s = merge_units(s, more_bases)
+
+    if do_simple_evals:
+        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
     return s
 
 
@@ -2535,7 +2561,7 @@ SCI = [
 
 ACTUAL_MATH = [
     ("one and a half", {}, "1.5"),
-    ("one and a third", {}, "1 and 1/3"),
+    ("one and a third", {}, "4/3"),
     ("one and a third", {"res": 3}, "1.333"),
     ("one and two thirds", {"res": 3}, "1.667"),
     ("one and two thirds", {"res": 4}, "1.6667"),
@@ -2560,10 +2586,12 @@ MORE = [
     ("8hr and 5min", {"config": "units"}, "29100s"),
     ("8hr5min", {"config": "units"}, "29100s"),
     ("half of an hour after sunrise", {"units": Unit("hour",value=60, new_unit="minute")}, "30 minutes after sunrise"),
-    ("an hour and a half after sunset", {}, "1.5 hours after sunset"),
-    ("an hour and a half after sunset", {"units": Unit("hour", base=True)}, "an hour and 0.5 after sunset"),
-    ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset")
-
+    ("an hour and a half after sunset", {}, "an hour and 0.5 after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour", base=True)}, "1.5 hours after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset"),
+    ("five and two thirds hours after noon", {}, "17/3 hours after noon" ),
+    ("five and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "340 minutes after noon" ),
+    ("five minutes and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "45 minutes after noon" )
 ]
 
 TESTS = [
