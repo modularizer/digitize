@@ -189,7 +189,7 @@ class Unit(UnitValue, UnitGrammar):
                 p = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
                 f = self.pattern.flags if isinstance(self.pattern, re.Pattern) else 0
                 self.full_pattern = re.compile(
-                    rf"(?<![A-Za-z])((?:\s)?)\s*{p}(?![A-Za-z])",
+                    rf"(?:(\s)|(?<![A-Za-z])){p}(?![A-Za-z])",
                     flags=f
                 )
 
@@ -201,14 +201,16 @@ class Unit(UnitValue, UnitGrammar):
         else:
             children = []
             for _k in self.key:
-                kw = {}
-                kw["base"] = self.base
-                if self.pattern is not _sentinel:
-                    kw["pattern"] = self.pattern.replace("%k", _k) if isinstance(self.pattern, str) else self.pattern
-                if self.full_pattern is not _sentinel:
-                    kw["full_pattern"] = self.full_pattern.replace("%k", _k) if isinstance(self.full_pattern, str) else self.full_pattern
-                children.extend(Unit(key=_k, value=self.value, **kw).children)
+                kw = {**self.__dict__, "children": (), "key": _k}
+                children.extend(Unit(**kw).children)
             self.children = children
+
+            opts = [self.key] if isinstance(self.key, str) else list(self.key)
+            opts += [guess_plural(k) for k in opts]
+            opts = set(opts)
+            p = "|".join(re.escape(v) for v in opts)
+            self.pattern=p
+
 
         self.children: list[Unit]
         if self.recurse and isinstance(self.new_unit, Unit):
@@ -220,35 +222,97 @@ class Unit(UnitValue, UnitGrammar):
         if self.replacement is _sentinel:
             self.replacement = "set of %n%u"
 
+    def suffix(self):
+        if self.new_unit and self.new_unit is not _sentinel:
+            nu = self.new_unit.children[0] if isinstance(self.new_unit, Unit) else self.new_unit
+            if self.value in ("1", "one", 1, "a", "the"):
+                p = nu.key
+            else:
+                p = nu.plural
+            return p
+        else:
+            return ""
+
     @property
     def full_replacement(self):
         if not self.replacement:
             return None
         if self.base:
-            raise RuntimeError("base units must not get replaced")
+            p = self.key if isinstance(self.key, str) else self.key[0]
+            return rf"\1{p}" if p else ""
         if self.new_unit and self.new_unit is not _sentinel:
-            if self.value in ("1", "one", 1, "a", "the"):
-                p = self.new_unit.children[0].key if isinstance(self.new_unit, Unit) else self.new_unit.key
-            else:
-                p = self.new_unit.children[0].plural if isinstance(self.new_unit, Unit) else (self.new_unit.plural or self.new_unit.key)
-            u = rf"\1{p}"
+            p = self.suffix()
+            u = rf"\1{p}" if p else ""
         else:
             u = ""
-        return r"\1" + self.replacement.replace("%n", str(self.value)).replace("%u", u)
+        n = str(self.value)
+        p = r"\1" + self.replacement.replace("%n", n).replace("%u", u)
+        return p
 
-    def sub(self, s):
+    def sub(self, s, all_units: list["Unit"] = None):
+        all_units = all_units or ()
         if not self.key:
-            return s
-        if self.base:
             return s
         if not s:
             return
         if self.is_group:
             for child in self.children:
-                s = child.sub(s)
+                s = child.sub(s, all_units)
             return s
-        else:
-            return re.sub(self.full_pattern, self.full_replacement, s)
+
+
+        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
+        if x := re.match( rf"(.*)(?:(\s)|(?<![A-Za-z]))(an?|\d) {pat} and (?:an? )?(\d+(?:\/|\.)\d+)(.*)", s):
+            # this ONLY is a match if the thing that follows is NOT a unit (unless it it the same unit
+            start = x.group(1)
+            s = x.group(2) or ""
+            n = 1 if x.group(3).startswith("a") else int(x.group(1))
+            f = x.group(4)
+            rest = x.group(5)
+            rm = re.match(r"(\S+)", rest.strip())
+            fw = rm.group(1) if rm else ""
+            rest2 = self.sub(rest, all_units)
+            rm2 = re.match(r"(\S+)", rest2.strip())
+            fw2 = rm2.group(1) if rm2 else ""
+            if fw == fw2:
+                if "/" in f:
+                    nums, dens = f.split("/")
+                    num = int(nums.strip())
+                    den = int(dens.strip())
+                    f = f"{(n*den + num)}/{den}"
+                elif "." in f:
+                    starts, ends = f.split(".")
+                    start = int(starts.strip())
+                    end = int(ends.strip())
+                    f = f"{start + n}.{end}"
+                else:
+                    f = str(n + int(f))
+
+                s = start + s + f + self.full_replacement.replace(r"\1", " ") + rest2
+        if not self.base:
+            s = re.sub(self.full_pattern, self.full_replacement, s)
+        return s
+
+
+
+    def base_merge(self, s):
+        if not self.key or not self.base or not self.pattern:
+            return s
+        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
+        n = r"((?:\d+(?:\.|\/\d+)?)|(?:an?))"
+        p = rf"{n}(\s?{pat})\s?(?:and )?{n}\s?({pat})"
+        def repl(m):
+            def norm(x):
+                return "1" if x in ("a", "an") else x
+
+            left = norm(m.group(1))
+            right = norm(m.group(3))
+            unit = m.group(2)
+            print("REP", left, right, unit)
+
+            return f"({left} + {right}){unit}"
+        # print(self.key, p, s)
+        return re.sub(p, repl, s)
 
 
 PI_DECIMAL = "3.14159265358979323846264338327950288419716939937510"
@@ -278,6 +342,9 @@ class UnitGroup:
 
         self.children = children
 
+    def __repr__(self):
+        return f"UnitGroup({self.base})"
+
 MetricPrefix = Literal["p", "n", "u", "m", "k", "M", "G", "T"]
 small_metric = "pnum"
 big_metric = "kMGT"
@@ -303,7 +370,8 @@ def build_metric_prefixes(group: Iterable[str], prefixes: Iterable[MetricPrefix]
             if isinstance(k, str):
                 k = mapping[k][0]
             old = list(o.get(k, []))
-            o[k] = old + ([v] if not isinstance(v, Iterable) else list(v))
+            o[k] = old + ([v] if isinstance(v, str) else list(v))
+            # print(f"o[{k}] = {o[k]}")
     return o
 
 
@@ -323,12 +391,12 @@ class units:
     dozens = Unit(key="dozen", value=12)
     bakers_dozens = Unit(key=("baker's dozen", "bakers dozen"), value=13)
     pairs = Unit(key="pair", value=2, pattern="pairs?(?: of)?")
-    grams = metric(("g", "gram"), all_metric, {"k": "kilo"})
+    grams = metric(("g", "gram"), all_metric, {1000: "kilo"})
     meters = metric(("m", "meter"))
     hz = metric(("Hz", "hz"), big_metric)
     seconds = metric(("s", "second"), small_metric,  {
             60: ("m", "min", "minute"),
-            60*60: ("h", "hour", "hour"),
+            60*60: ("h", "hr", "hour"),
             24*60*60: ("d", "day"),
             7*24*60*60: ("w", "wk", "week")
         }
@@ -338,7 +406,7 @@ class units:
         24*60: ("d", "day"),
         7*24*60: ("w", "wk", "week")
     })
-    hours= UnitGroup(("h", "hour", "hour"), {
+    hours= UnitGroup(("h", "hr", "hour"), {
         24: ("d", "day"),
         7*24: ("w", "wk", "week")
     })
@@ -465,6 +533,22 @@ default = DigitizeParams(
 
 class modes:
     default = default
+    units = default.replace(
+        units = (
+            units.dozens,
+            units.bakers_dozens,
+            units.pi,
+            units.pairs,
+            units.meters,
+            units.seconds,
+            units.feet,
+            units.grams,
+            units.hz,
+            units.inches,
+            units.yards,
+            units.months,
+        )
+    )
 
     nomath = default.replace(
         combine_add=False,
@@ -551,7 +635,7 @@ def digitize(
         do_simple_evals: bool = _sentinel,
         do_fraction_evals: bool = _sentinel,
         breaks: str | Iterable[str] = _sentinel,
-        units: Unit | UnitGroup | Iterable[Unit] = _sentinel
+        units: Unit | UnitGroup | Iterable[Unit] = _sentinel,
 
 ) -> str:
     if not s.strip():
@@ -734,20 +818,7 @@ def digitize(
         )
 
 
-    all_units = []
-    if isinstance(units, UnitGroup | Unit):
-        all_units = units.children
-    else:
-        for u in units:
-            all_units.extend(u.children)
 
-    all_units = list(sorted(all_units, key=lambda u: len(u.key), reverse=True))
-
-
-    for u in all_units:
-        # print(f"checking unit {u.key}, {u.full_pattern}, {u.full_replacement}, {s=}")
-        s = u.sub(s)
-        # print(f"{s=}")
 
     n019 = [
         "zero","one","two","three","four","five","six","seven",
@@ -1523,10 +1594,27 @@ def digitize(
     if pending_ws:
         out.append(pending_ws)
 
-    s = "".join(out)
+    s = "".join(out).replace("%p", "")
 
     if attempt_to_differentiate_seconds:
         s = re.sub(_SEC__sentinel, "second", s)
+
+    all_units = []
+    if isinstance(units, UnitGroup | Unit):
+        all_units = units.children
+    else:
+        for u in units:
+            all_units.extend(u.children)
+
+    all_units = list(sorted(all_units, key=lambda u: len(u.key), reverse=True))
+
+
+    # print("pre sub", s)
+    for u in all_units:
+        # print(f"checking unit {u.key}, {u.full_pattern}, {u.full_replacement}, {s=}")
+        s = u.sub(s, all_units)
+        # print(f"{s=}")
+    # print("post sub", s)
 
     if _repeat_map:
         s = re.sub(
@@ -1539,8 +1627,6 @@ def digitize(
 
     if parse_signs:
         num_rx = r"(\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
-
-
         s = re.sub(rf"\b(neg|negative|minus)\s+{num_rx}\b", r"-\2", s, flags=re.IGNORECASE)
         s = re.sub(rf"\b(pos|positive|plus)\s+{num_rx}\b", r"+\2", s, flags=re.IGNORECASE)
         s = re.sub(rf"\+\s+{num_rx}\b", r"+\1", s, flags=re.IGNORECASE)
@@ -1566,7 +1652,7 @@ def digitize(
 
 
     s = re.sub(
-        rf"\b({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})\b",
+        rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
         rf"\1{mult}\2",
         s,
         flags=re.IGNORECASE,
@@ -1780,15 +1866,41 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
+    # print("testing", s)
+
+    s = re.sub(
+        r"(\d+(?:\/|\.)\d+) of (?:an?\s?set(?:\(s\))?s? of )?(\d+)",
+        rf"(\1){mult}\2",
+        s,
+        flags=re.IGNORECASE,
+    )
+
 
     if do_simple_evals:
+        # print("se", s)
         s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
 
     # replace hanging
-    s = re.sub(rf"(?:a )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
+    s = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
+    def merge_units(s, u):
+        # print(f"u", u)
+        if isinstance(u, UnitGroup):
+            s = u.base.base_merge(s)
+        elif isinstance(u, Unit):
+            s = u.base_merge(s)
+        else:
+            for u2 in u:
+                s = merge_units(s, u2)
+        return s
 
-
+    s2 = merge_units(s, units)
+    if s2 != s:
+        s= s2
+        if do_simple_evals:
+            # print("se", s)
+            s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
     return s
+
 
 
 
@@ -2105,18 +2217,15 @@ def simple_eval(
 ) -> str:
     s = s.replace(power, "**").replace(mult, "*").replace(div, "/")
 
-    # expr_rx = re.compile(r"(?<!\S)[0-9\(\)\.\s\+\-\*/pPiI]+(?!\S)")
-    expr_rx = re.compile(r"[0-9\(\)\.\s\+\-\*/pPiI]+")
+    expr_rx = re.compile(r"""
+        [0-9\(\)\.pPiI]                # first non-space char
+        [0-9\(\)\.\s\+\-\*/pPiI]*      # middle (spaces allowed)
+        [0-9\)\.pPiI]                  # last non-space char
+    """, re.VERBOSE)
     for m in reversed(list(expr_rx.finditer(s))):
         expr = m.group(0)
         if not _has_real_math(expr):
             continue
-
-        # Preserve whitespace that your regex matched
-        lead_len = len(expr) - len(expr.lstrip())
-        trail_len = len(expr) - len(expr.rstrip())
-        lead = expr[:lead_len]
-        trail = expr[len(expr) - trail_len:] if trail_len else ""
 
         core = expr.strip()
         try:
@@ -2161,7 +2270,7 @@ def simple_eval(
                             out = "-" + out
 
         # Put whitespace back exactly as it was in the matched span
-        s = s[:m.start()] + lead + out + trail + s[m.end():]
+        s = s[:m.start()] + out + s[m.end():]
 
 
     s = s.replace("**", power).replace("*", mult).replace("/", div)
@@ -2444,7 +2553,16 @@ MORE = [
     ("five dozen donuts", {"do_simple_evals": False}, "5*12 donuts"),
     ("five dozen donuts", {}, "60 donuts"),
     ("8 sets of 3 cds", {"do_simple_evals": False}, "8*3 cds"),
-    ("8 sets of 3 cds", {}, "24 cds")
+    ("8 sets of 3 cds", {}, "24 cds"),
+    ("8 hours", {"config": "units"}, "28800 s"),
+    ("8hours", {"config": "units"}, "28800s"),
+    ("8hr", {"config": "units"}, "28800s"),
+    ("8hr and 5min", {"config": "units"}, "29100s"),
+    ("8hr5min", {"config": "units"}, "29100s"),
+    ("half of an hour after sunrise", {"units": Unit("hour",value=60, new_unit="minute")}, "30 minutes after sunrise"),
+    ("an hour and a half after sunset", {}, "1.5 hours after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour", base=True)}, "an hour and 0.5 after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset")
 
 ]
 
@@ -2662,7 +2780,7 @@ def main(argv: list[str] | None = None) -> int:
 
 if __name__ == "__main__":
     # pass
-    # loop(units=units.seconds, raise_exc=True)
+    # loop(config="units", raise_exc=True)
     # loop(raise_exc=True)
     # print("simple_eval", simple_eval("5*12 donuts"))
     if not sys.argv[1:]:
