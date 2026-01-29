@@ -269,7 +269,7 @@ class Unit(UnitValue, UnitGrammar):
             n = 1 if x.group(3).startswith("a") else int(x.group(1))
             f = x.group(4)
             rest = x.group(5)
-            print(f"{n=}, {f=}, {rest=}")
+            # print(f"{n=}, {f=}, {rest=}")
             rm = re.match(r"(\S+)", rest.strip())
             fw = rm.group(1) if rm else ""
             rest2 = self.sub(rest, all_units)
@@ -299,24 +299,41 @@ class Unit(UnitValue, UnitGrammar):
         return s
 
 
+    def base_merge2(self, s):
+        if not self.key or not self.base or not self.pattern:
+            return s
+        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
+        n = r"(?:-?\d+(?:\.\d+)?|-?\d+/\d+|an?)"
+
+
+        p1 = rf"({n})\s?({pat})\s?(?:less|fewer) (?:than|then) ({n})\s?({pat})"
+        p2 = rf"({n})\s?({pat})\s?(?:more|greater) (?:than|then) ({n})\s?({pat})"
+        s = re.sub(p1, r"(\3 - \1) \2", s)
+        s = re.sub(p2, r"(\3 + \1) \2", s)
+        return s
 
     def base_merge(self, s):
         if not self.key or not self.base or not self.pattern:
             return s
         pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
-        n = r"((?:\d+(?:\.|\/\d+)?)|(?:an?))"
-        p = rf"{n}(\s?{pat})\s?(?:and )?{n}\s?({pat})"
+        n = r"(?:(?:-?\d+(?:\.|\/\d+)?)|(?:an?))"
+
+        # print(self.key, pat)
+        p = rf"({n})(\s?{pat})\s?(?:and )?({n})\s?({pat})"
+
+        # print("P", p, "S", s)
         def repl(m):
             def norm(x):
                 return "1" if x in ("a", "an") else x
-
             left = norm(m.group(1))
             right = norm(m.group(3))
             unit = m.group(2)
-
             return f"({left} + {right}){unit}"
         # print(self.key, p, s)
         return re.sub(p, repl, s)
+
+
+
 
 
 PI_DECIMAL = "3.14159265358979323846264338327950288419716939937510"
@@ -329,20 +346,25 @@ class UnitGroup:
     children: Iterable[Unit] = ()
 
     def __post_init__(self):
+        base_keys = []
         if isinstance(self.base, str):
-            self.base = Unit(key=self.base, base=True)
+            base_keys = [self.base]
         elif isinstance(self.base, Iterable):
-            self.base = Unit(key=self.base, base=True)
+            base_keys = [b.children.key if hasattr(b, "children") else b for b in self.base]
         elif isinstance(self.base, Unit):
-            pass
+            base_keys = [b.key for b in self.base.children]
         else:
             print(f"base:{self.base}")
             raise TypeError("invalid base")
 
+        base_key = base_keys[0]
+        self.base = Unit(key=base_key, base=True)
+
         children = []
-        children.extend([v for v in self.base.children if not v.base])
+        children.extend([Unit(key=k, value=1, new_unit=self.base) for k in base_keys[1:]])
         for v, k in self.names.items():
             children.append(Unit(key=k, value=v, new_unit=self.base))
+
 
         self.children = children
 
@@ -640,6 +662,7 @@ def digitize(
         do_fraction_evals: bool = _sentinel,
         breaks: str | Iterable[str] = _sentinel,
         units: Unit | UnitGroup | Iterable[Unit] = _sentinel,
+        _iter: bool = True
 
 ) -> str:
     if not s.strip():
@@ -1908,6 +1931,15 @@ def digitize(
             for u2 in u:
                 s = merge_units(s, u2)
         return s
+    def merge_units2(s, u):
+        if isinstance(u, UnitGroup):
+            s = u.base.base_merge2(s)
+        elif isinstance(u, Unit):
+            s = u.base_merge2(s)
+        else:
+            for u2 in u:
+                s = merge_units2(s, u2)
+        return s
     base_units = [u for u in all_units if u.base]
     known_bu_keys = set()
     for bu in base_units:
@@ -1917,15 +1949,54 @@ def digitize(
             for buk in bu.key:
                 known_bu_keys.add(buk)
 
-    s = merge_units(s, base_units)
-    new_units = set(u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else "" for u in all_units)
+
+    new_units = set()
+    for u in all_units:
+        nu = u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else ""
+        if nu:
+            if isinstance(nu, str):
+                new_units.add(nu)
+            else:
+                for nuk in nu:
+                    new_units.add(nuk)
+    # u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else "" for u in all_units)
     new_units = [nu for nu in new_units if nu not in known_bu_keys]
     more_bases = [Unit(k, base=True) for k in new_units]
+    # print("more bases", new_units)
+
+    s = merge_units(s, base_units)
+    s = merge_units(s, more_bases)
+    # print("pre-merg2", s)
+    s = merge_units2(s, base_units)
+    s = merge_units2(s, more_bases)
+    # print("post-merg2", s)
+    if do_simple_evals:
+        # print("se", s)
+        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+
+    s = merge_units(s, base_units)
     s = merge_units(s, more_bases)
 
-    if do_simple_evals:
-        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
-    return s
+    if not _iter:
+        return s
+    first = s
+    s2 = digitize(s, config=config, _iter=False)
+    # print("ITER 0", s)
+    # print("ITER 1", s2)
+    i = 0
+    prevs = [s]
+    while i < 100:
+        if s2 == s:
+            return s
+        if s2 in prevs:
+            return first
+        if len(s2) > len(s):
+            return s
+        prevs.append(s2)
+        s = s2
+        s2 = digitize(s, config=config, _iter=False)
+        i += 1
+    raise StopIteration(f"hit {i}")
 
 
 
@@ -2591,7 +2662,14 @@ MORE = [
     ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset"),
     ("five and two thirds hours after noon", {}, "17/3 hours after noon" ),
     ("five and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "340 minutes after noon" ),
-    ("five minutes and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "45 minutes after noon" )
+    ("five minutes and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "45 minutes after noon" ),
+    ("an hour and 22 minutes after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "82 minutes after noon" ),
+    ("an hour and 22 minutes and 43 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
+    ("an hour and 23 minutes minus 17 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
+    ("5 seconds less than a minute", {"units": units.seconds}, "55 s" ),
+    ("an hour and a half less than two hours",{"units": Unit("hour", base=True)}, "0.5 hours" ),
+    ("5.5 minutes less than two hours",{"units": Unit("hour", value=60, new_unit="minute")}, "114.5 minutes" ),
+    ("5 minutes and 35 seconds less than two hours",{"units": units.seconds}, "6865 s" ),
 ]
 
 TESTS = [
@@ -2806,11 +2884,52 @@ def main(argv: list[str] | None = None) -> int:
     return 0
 
 
+def build_md_table(suite):
+    results = []
+    def limit_width(s, n = 60):
+        if len(s) > n:
+            return s[:n - 3] + "..."
+        return s
+    for prompt, params, _ in suite:
+        if "\n" in prompt:
+            continue
+        out = digitize(prompt, **params)
+        results.append({
+            "prompt": limit_width(str(prompt)),
+            "params": limit_width(str(params)),
+            "output": limit_width(str(out)),
+        })
+
+    headers = ["prompt", "output", "params"]
+
+    # compute column widths
+    widths = {
+        h: max(len(h), max(len(row[h]) for row in results))
+        for h in headers
+    }
+
+    def row(values):
+        return "| " + " | ".join(
+            values[h].ljust(widths[h]) for h in headers
+        ) + " |"
+
+    lines = []
+    lines.append(row({h: h for h in headers}))
+    lines.append("| " + " | ".join("-" * widths[h] for h in headers) + " |")
+
+    for r in results:
+        lines.append(row(r))
+
+    return "\n".join(lines)
+
+
+
 if __name__ == "__main__":
-    # pass
-    # loop(config="units", raise_exc=True)
-    # loop(raise_exc=True)
-    # print("simple_eval", simple_eval("5*12 donuts"))
-    if not sys.argv[1:]:
-        raise SystemExit(main(["", "-m", "demo"]))
-    raise SystemExit(main())
+    print(build_md_table(TESTS))
+    # # pass
+    # # loop(config="units", raise_exc=True)
+    # # loop(raise_exc=True)
+    # # print("simple_eval", simple_eval("5*12 donuts"))
+    # if not sys.argv[1:]:
+    #     raise SystemExit(main(["", "-m", "demo"]))
+    # raise SystemExit(main())
