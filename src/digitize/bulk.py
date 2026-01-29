@@ -4,733 +4,40 @@ import ast
 import re
 import sys
 from collections.abc import Iterable
-from dataclasses import dataclass
 from fractions import Fraction
-from typing import Tuple, Literal, Union, TypedDict, Optional
-from decimal import Decimal, localcontext, ROUND_HALF_UP
-
-
-class Sentinel:
-    def __bool__(self):
-        return False
-    def __repr__(self):
-        return ""
-    def __str__(self):
-        return ""
-
-_sentinel = Sentinel()
-
-SIMPLE_REP_PATTERN = r"(?:time|occurence|instance)s?"
-COMPLEX_REP_PATTERN = r"(?:time|occurence|instance|attempt|try|tries)s?(?: (?:at|of))?(?: (?:which|when))?"
-
-
-
-def guess_plural(word: str, known: dict[str, str] = None, skip: list[str] = None) -> str:
-    if not word.strip() or not word[-1].strip():
-        return word
-    know_mapping = {
-        "child": "children",
-        "person": "people",
-        "man": "men",
-        "woman": "women",
-        "Hz": "Hz",
-        **(known or {}),
-        **({x: x for x in (skip or [])})
-    }
-    if know_mapping.get(word, None) is not None:
-        return know_mapping[word]
-    if word.isupper():
-        return word
-    if len(word) == 1:
-        return word
-    if re.search(r"[aeiou]y$", word):
-        return word + "s"          # day → days
-    if re.search(r"y$", word):
-        return word[:-1] + "ies"   # city → cities
-    if re.search(r"(s|x|z|ch|sh)$", word):
-        return word + "es"         # box → boxes
-    if re.search(r"fe$", word):
-        return word[:-2] + "ves"   # knife → knives
-    if re.search(r"f$", word):
-        return word[:-1] + "ves"   # leaf → leaves (best guess)
-    return word + "s"
-
-@dataclass
-class UnitGrammar:
-    key: str
-    s: Optional[bool] = _sentinel # means the plural is just + 's'
-    plural: Optional[str] = _sentinel
-
-    def __post_init__(self):
-        if not isinstance(self.key, str):
-            raise TypeError("key must be a string")
-        if self.plural is _sentinel or not self.plural:
-            if self.s is _sentinel:
-                self.plural = guess_plural(self.key)
-            elif self.s:
-                self.plural = self.key + "s"
-            else:
-                self.plural = self.key
-
-    def __repr__(self):
-        return f"UnitGrammar(key={self.key}, plural={self.plural})"
-
-    def __str__(self):
-        return self.key
-
-
-
-@dataclass
-class UnitValue:
-    value: int | str = 1
-    new_unit: Optional["str | UnitGrammar | Unit"]  = "" # converts to a new unit
-    new_unit_plural: Optional[str] = ""
-    recurse: bool = False # adds new_unit to list of units
-    replacement: Optional[str] = "set(s) of %n%u"
-
-    def __repr__(self):
-        return f"UnitValue({self.value}, new_unit={self.new_unit})"
-
-    def __str__(self):
-        if self.value in ("1", "one", 1, "a", "the"):
-            p = self.new_unit.children[0].key if isinstance(self.new_unit, Unit) else self.new_unit
-        else:
-            p = self.new_unit.children[0].plural if isinstance(self.new_unit, Unit) else self.new_unit
-        u = f" {p}"
-        return f"{self.value} {u}"
-
-
-@dataclass
-class Unit(UnitValue, UnitGrammar):
-    key: str | Iterable[str]
-    value: int | str | UnitValue = 1
-    base: bool = False
-    new_unit: Optional["str | UnitGrammar | Unit"]  = _sentinel # converts to a new unit
-    new_unit_plural: Optional[str] = _sentinel
-    recurse: bool = _sentinel # adds new_unit to list of units
-    replacement: Optional[str] = _sentinel
-    s: Optional[bool] = _sentinel # means the plural is just + 's'
-    plural: Optional[str] = _sentinel
-    pattern: Optional[str | re.Pattern] = _sentinel
-    full_pattern: Optional[str | re.Pattern] = _sentinel
-    children: Iterable["Unit"] = _sentinel
-
-    @property
-    def is_group(self):
-        return not isinstance(self.key, str)
-
-    def __repr__(self):
-        return f"Unit(key={self.key}, value={self.value}, ...)"
-
-    def __str__(self):
-        return str(self.key)
-
-
-    def __post_init__(self):
-        if self.children is _sentinel:
-            self.children = [self]
-        self.children = list(self.children)
-        if not self.key:
-            return
-        if isinstance(self.key, str):
-            if not isinstance(self.key, str):
-                raise TypeError("key must be a string")
-            if self.plural is _sentinel or not self.plural:
-                if self.s is _sentinel:
-                    self.plural = guess_plural(self.key)
-                elif self.s:
-                    self.plural = self.key + "s"
-                else:
-                    self.plural = self.key
-        if not isinstance(self.value, UnitValue):
-            self.value = UnitValue(
-                value=self.value,
-                new_unit=self.new_unit or "",
-                new_unit_plural=self.new_unit_plural or "",
-                recurse=self.recurse or False,
-                replacement=self.replacement if self.replacement is not _sentinel else "set(s) of %n%u"
-            )
-        if self.new_unit is _sentinel:
-            self.new_unit = self.value.new_unit
-        if self.new_unit_plural is _sentinel:
-            self.new_unit_plural = self.new_unit.plural if isinstance(self.new_unit, Unit) else ""
-        if self.recurse is _sentinel:
-            self.recurse = self.value.recurse or False
-        if self.replacement is _sentinel:
-            self.replacement = self.value.replacement
-        self.value = self.value.value
-
-        if isinstance(self.new_unit, str):
-            self.new_unit = UnitGrammar(key=self.new_unit, plural=self.new_unit_plural)
-
-        if not self.is_group:
-            if self.pattern is _sentinel or not self.pattern:
-                if self.plural == self.key:
-                    self.pattern  = re.escape(self.key)
-                else:
-                    shared = ""
-                    for i, s in enumerate(self.key):
-                        if self.plural[i] == s:
-                            shared += s
-                    key_end = self.key[len(shared):]
-                    plural_end = self.plural[len(shared):]
-                    parts = [ v for v in [key_end, plural_end] if v]
-                    if parts:
-                        opts = "|".join(re.escape(p) for p in parts)
-                        q = '?' if len(parts) == 1 else ''
-                        self.pattern = rf"{re.escape(shared)}(?:{opts}){q}"
-                    else:
-                        self.pattern = rf"{re.escape(shared)}"
-
-            if isinstance(self.pattern, str):
-                self.pattern = re.compile(self.pattern.replace("%k", self.key))
-
-            if self.full_pattern is _sentinel or not self.full_pattern:
-                p = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
-                f = self.pattern.flags if isinstance(self.pattern, re.Pattern) else 0
-                self.full_pattern = re.compile(
-                    rf"(?:(\s)|(?<![A-Za-z])){p}(?![A-Za-z])",
-                    flags=f
-                )
-
-
-            if isinstance(self.full_pattern, str):
-                self.full_pattern = re.compile(self.full_pattern.replace("%k", self.key))
-
-            self.children = [self]
-        else:
-            children = []
-            for _k in self.key:
-                kw = {**self.__dict__, "children": (), "key": _k}
-                children.extend(Unit(**kw).children)
-            self.children = children
-
-            opts = [self.key] if isinstance(self.key, str) else list(self.key)
-            opts += [guess_plural(k) for k in opts]
-            opts = set(opts)
-            p = "|".join(re.escape(v) for v in opts)
-            self.pattern=p
-
-
-        self.children: list[Unit]
-        if self.recurse and isinstance(self.new_unit, Unit):
-            self.children.extend(self.new_unit.children)
-
-        if self.base:
-            self.full_pattern = None
-
-        if self.replacement is _sentinel:
-            self.replacement = "set of %n%u"
-
-    def suffix(self):
-        if self.new_unit and self.new_unit is not _sentinel:
-            nu = self.new_unit.children[0] if isinstance(self.new_unit, Unit) else self.new_unit
-            if self.value in ("1", "one", 1, "a", "the"):
-                p = nu.key
-            else:
-                p = nu.plural
-            return p
-        else:
-            return ""
-
-    @property
-    def full_replacement(self):
-        if not self.replacement:
-            return None
-        if self.base:
-            p = self.key if isinstance(self.key, str) else self.key[0]
-            return rf"\1{p}" if p else ""
-        if self.new_unit and self.new_unit is not _sentinel:
-            p = self.suffix()
-            u = rf"\1{p}" if p else ""
-        else:
-            u = ""
-        n = str(self.value)
-        p = r"\1" + self.replacement.replace("%n", n).replace("%u", u)
-        return p
-
-    def sub(self, s, all_units: list["Unit"] = None):
-        all_units = all_units or ()
-        if not self.key:
-            return s
-        if not s:
-            return
-        if self.is_group:
-            for child in self.children:
-                s = child.sub(s, all_units)
-            return s
-
-
-        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
-        if x := re.match( rf"(.*)(?:(\s)|(?<![A-Za-z]))(an?|\d) {pat} and (?:an? )?(\d+(?:\/|\.)\d+)(.*)", s):
-            # this ONLY is a match if the thing that follows is NOT a unit (unless it it the same unit
-            start = x.group(1)
-            s = x.group(2) or ""
-            n = 1 if x.group(3).startswith("a") else int(x.group(1))
-            f = x.group(4)
-            rest = x.group(5)
-            # print(f"{n=}, {f=}, {rest=}")
-            rm = re.match(r"(\S+)", rest.strip())
-            fw = rm.group(1) if rm else ""
-            rest2 = self.sub(rest, all_units)
-            rm2 = re.match(r"(\S+)", rest2.strip())
-            fw2 = rm2.group(1) if rm2 else ""
-            if fw == fw2:
-                if "/" in f:
-                    nums, dens = f.split("/")
-                    num = int(nums.strip())
-                    den = int(dens.strip())
-                    f = f"{(n*den + num)}/{den}"
-                elif "." in f:
-                    starts, ends = f.split(".")
-                    start = int(starts.strip())
-                    end = int(ends.strip())
-                    f = f"{start + n}.{end}"
-                else:
-                    f = str(n + int(f))
-                rep = self.full_replacement.replace(r"\1", " ")
-                if self.base and f != "1":
-                    k = self.key if isinstance(self.key, str) else self.key[0]
-                    p = self.plural if self.plural else guess_plural(k)
-                    rep = f" {p}"
-                s = start + s + f + rep + rest2
-        if not self.base:
-            s = re.sub(self.full_pattern, self.full_replacement, s)
-        return s
-
-
-    def base_merge2(self, s):
-        if not self.key or not self.base or not self.pattern:
-            return s
-        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
-        n = r"(?:-?\d+(?:\.\d+)?|-?\d+/\d+|an?)"
-
-
-        p1 = rf"({n})\s?({pat})\s?(?:less|fewer) (?:than|then) ({n})\s?({pat})"
-        p2 = rf"({n})\s?({pat})\s?(?:more|greater) (?:than|then) ({n})\s?({pat})"
-        s = re.sub(p1, r"(\3 - \1) \2", s)
-        s = re.sub(p2, r"(\3 + \1) \2", s)
-        return s
-
-    def base_merge(self, s):
-        if not self.key or not self.base or not self.pattern:
-            return s
-        pat = self.pattern.pattern if isinstance(self.pattern, re.Pattern) else self.pattern
-        n = r"(?:(?:-?\d+(?:\.|\/\d+)?)|(?:an?))"
-
-        # print(self.key, pat)
-        p = rf"({n})(\s?{pat})\s?(?:and )?({n})\s?({pat})"
-
-        # print("P", p, "S", s)
-        def repl(m):
-            def norm(x):
-                return "1" if x in ("a", "an") else x
-            left = norm(m.group(1))
-            right = norm(m.group(3))
-            unit = m.group(2)
-            return f"({left} + {right}){unit}"
-        # print(self.key, p, s)
-        return re.sub(p, repl, s)
-
-
-
-
-
-PI_DECIMAL = "3.14159265358979323846264338327950288419716939937510"
-
-
-@dataclass
-class UnitGroup:
-    base: Unit | str | Iterable[str]
-    names: dict[int, str|Iterable[str]]
-    children: Iterable[Unit] = ()
-
-    def __post_init__(self):
-        base_keys = []
-        if isinstance(self.base, str):
-            base_keys = [self.base]
-        elif isinstance(self.base, Iterable):
-            base_keys = [b.children.key if hasattr(b, "children") else b for b in self.base]
-        elif isinstance(self.base, Unit):
-            base_keys = [b.key for b in self.base.children]
-        else:
-            print(f"base:{self.base}")
-            raise TypeError("invalid base")
-
-        base_key = base_keys[0]
-        self.base = Unit(key=base_key, base=True)
-
-        children = []
-        children.extend([Unit(key=k, value=1, new_unit=self.base) for k in base_keys[1:]])
-        for v, k in self.names.items():
-            children.append(Unit(key=k, value=v, new_unit=self.base))
-
-
-        self.children = children
-
-    def __repr__(self):
-        return f"UnitGroup({self.base})"
-
-MetricPrefix = Literal["p", "n", "u", "m", "k", "M", "G", "T"]
-small_metric = "pnum"
-big_metric = "kMGT"
-all_metric = small_metric + big_metric
-def build_metric_prefixes(group: Iterable[str], prefixes: Iterable[MetricPrefix] = all_metric, extra: dict[str | int | float, str | Iterable[str]] = None) -> dict[int, Iterable[str]]:
-    group = list(group)
-    mapping = {
-        "p": [0.000000000001, ("p", "pico")],
-        "n": [0.000000001, ("n", "nano")],
-        "u": [0.000001, ("μ", "micro")],
-        "m": [0.001, ("m", "milli")],
-        "k": [1000, ("k", "kilo")],
-        "M": [10**6, ("M", "mega")],
-        "G": [10**9, ("G", "giga")],
-        "T": [10**12, ("T", "tera")]
-    }
-    o = {
-        mapping[p][0]: tuple(p2+group[i2] for i2, p2 in enumerate(mapping[p][1]))
-        for i, p in enumerate(prefixes)
-    }
-    if extra:
-        for k, v in extra.items():
-            if isinstance(k, str):
-                k = mapping[k][0]
-            old = list(o.get(k, []))
-            o[k] = old + ([v] if isinstance(v, str) else list(v))
-            # print(f"o[{k}] = {o[k]}")
-    return o
-
-
-def metric(
-        base: Iterable[str],
-        prefixes: Iterable[MetricPrefix] = all_metric,
-        extra: dict[str | int | float, str | Iterable[str]] = None
-):
-    return UnitGroup(
-        base,
-        build_metric_prefixes(base, prefixes, extra)
-    )
-
-
-class units:
-    pi = Unit(key=("pi", "PI", "math.pi", "π"), value=PI_DECIMAL)
-    dozens = Unit(key="dozen", value=12)
-    bakers_dozens = Unit(key=("baker's dozen", "bakers dozen"), value=13)
-    pairs = Unit(key="pair", value=2, pattern="pairs?(?: of)?")
-    grams = metric(("g", "gram"), all_metric, {1000: "kilo"})
-    meters = metric(("m", "meter"))
-    hz = metric(("Hz", "hz"), big_metric)
-    seconds = metric(("s", "second"), small_metric,  {
-            60: ("m", "min", "minute"),
-            60*60: ("h", "hr", "hour"),
-            24*60*60: ("d", "day"),
-            7*24*60*60: ("w", "wk", "week")
-        }
-    )
-    minutes = UnitGroup(("min", "minute"), {
-        60: ("h", "hour", "hour"),
-        24*60: ("d", "day"),
-        7*24*60: ("w", "wk", "week")
-    })
-    hours= UnitGroup(("h", "hr", "hour"), {
-        24: ("d", "day"),
-        7*24: ("w", "wk", "week")
-    })
-    days = UnitGroup(("d", "day"), {
-        7*24: ("w", "wk", "week")
-    })
-    months = UnitGroup(("mo", "month"), {3: "season", 12: ("y", "yr", "year"), 120: "decade", 1200: "century", 12000: "eon"})
-    years = UnitGroup(("y", "yr", "year"), {10: "decade", 100: "century", 1000: "eon"})
-    inches = UnitGroup("inch", {
-        12: ("ft", "foot"),
-        12*3: ("yd", "yard"),
-        12*5280: ("mi", "mile")
-    })
-    feet = UnitGroup(("ft", "foot"), {
-        3: ("yd", "yard"),
-        5280: ("mi", "mile")
-    })
-    yards = UnitGroup(("yd", "yard"), {
-        1760: ("mi", "mile")
-    })
-
-
-
-DigitizeMode = Literal["default", "token", "strip", "num", "norm"]
-
-@dataclass
-class DigitizeParams:
-    description: str = _sentinel
-    config: DigitizeMode | any = _sentinel
-    use_commas: bool = _sentinel
-    fmt: str = _sentinel
-
-    replace_multipliers: bool = _sentinel
-    fmt_multipliers: str | None = _sentinel
-
-    # Ordinals:
-    support_ordinals: bool = _sentinel
-    fmt_ordinal: str | None  = _sentinel     # one hundred seventy-second -> 172nd
-
-    # reps / "time(s)":
-    rep_signifiers: str | re.Pattern | Iterable[str | re.Pattern] = _sentinel
-    support_reps: bool = _sentinel
-    fmt_rep: str | None = _sentinel     # default "%nx"    -> 3x   (for "3 times", "twice")
-    fmt_nth_time: str | None  = _sentinel    # default "%n%ox"  -> 500th time (for "500th time")
-    rep_fmt: str = _sentinel
-    rep_fmt_plural: bool = _sentinel
-
-    attempt_to_differentiate_seconds: bool = _sentinel
-
-    literal_fmt: bool | None  = _sentinel
-    
-    support_roman: bool = _sentinel
-    
-    parse_signs: bool = _sentinel
-
-    power: str = _sentinel
-    mult: str = _sentinel
-    div: str = _sentinel
-
-    combine_add: bool = _sentinel
-    res: int | None = _sentinel
-    do_simple_evals: bool = _sentinel
-    do_fraction_evals: bool = _sentinel
-
-
-    breaks: Iterable[str] = _sentinel
-    units: Unit | UnitGroup | Iterable[Unit] = _sentinel
-
-    def non_sentinels(self) -> dict:
-        return {k: v for k, v in self.__dict__.items() if v is not _sentinel}
-
-    def replace(self, **kwargs):
-        return DigitizeParams(**{**self.__dict__, **kwargs})
-
-    def __repr__(self):
-        d = "\n".join(f"\t{k}={v if not isinstance(v, DigitizeParams) else v.config}," for k, v in self.non_sentinels().items())
-        return f"DigitizeParams(\n{d}\n)"
-
-
-default = DigitizeParams(
-        description="Tries to respect human language. Pretty and semi-parseable",
-        config="default",
-        use_commas= False,
-        fmt= "%n",
-        replace_multipliers = True,
-        fmt_multipliers=None,
-
-        # Ordinals:
-        support_ordinals = True,
-        fmt_ordinal=None,     # one hundred seventy-second -> 172nd
-
-        # reps / "time(s)":
-        rep_signifiers = COMPLEX_REP_PATTERN,
-        support_reps= True,
-        fmt_rep=None,      # default "%nx"    -> 3x   (for "3 times", "twice")
-        fmt_nth_time =None,    # default "%n%ox"  -> 500th time (for "500th time")
-        rep_fmt= "time",
-        rep_fmt_plural = True,
-
-        attempt_to_differentiate_seconds = True,
-
-        literal_fmt = False,
-        
-        support_roman = False,
-        
-        parse_signs = True,
-        power="**",
-        mult="*",
-        div="/",
-        combine_add=True,
-        res=None,
-        do_simple_evals=True,
-        do_fraction_evals=True,
-        breaks=(),
-        units=(
-            units.dozens,
-            units.bakers_dozens,
-            units.pi,
-            units.pairs,
-        )
-    )
-
-
-
-class modes:
-    default = default
-    units = default.replace(
-        units = (
-            units.dozens,
-            units.bakers_dozens,
-            units.pi,
-            units.pairs,
-            units.meters,
-            units.seconds,
-            units.feet,
-            units.grams,
-            units.hz,
-            units.inches,
-            units.yards,
-            units.months,
-        )
-    )
-
-    nomath = default.replace(
-        combine_add=False,
-        do_simple_evals=False,
-        do_fraction_evals=False
-    )
-
-    simplemath = default.replace(
-        combine_add=True,
-        do_simple_evals=True,
-        res=None,
-        do_fraction_evals=False
-    )
-
-    token = default.replace(
-        description="ugly but parseable",
-        config="token",
-        fmt="[NUM=%n,OG=%i]",
-        fmt_multipliers="[NUM=%n,MULT=%m,OG=%i]",
-        fmt_ordinal="[NUM=%n,ORD=%o,OG=%i]",
-        fmt_rep="[NUM=%n,REP=%r,OG=%i]",
-        fmt_nth_time="[NUM=%n,ORD=%o,REP=%r,OG=%i]",
-    )
-
-    strip = default.replace(
-        description="simplifies the string a lot but very lossy of n-th n-th times, etc",
-        config="strip",
-        rep_signifiers=COMPLEX_REP_PATTERN,
-        fmt_ordinal="%n",
-        fmt_rep="%n",
-        fmt_nth_time="%n",
-    )
-
-    nums = default.replace(
-        description="do not even look for once, n times, etc.",
-        config="num",
-        support_reps=False,
-        attempt_to_differentiate_seconds=False,
-    )
-
-    norm = default.replace(
-        description="Not grammatically correct but more parseable. e.g. 1-th, 2-th, 3-th time, etc",
-        config="norm",
-        fmt_ordinal="%n-th",
-        fmt_rep="%n-th time"
-    )
-
-
+from math import isqrt
+from typing import Tuple, Literal
+from decimal import Decimal, localcontext, ROUND_HALF_UP, getcontext
+
+from digitize.config import DigitizeMode, DigitizeParams, default
+from digitize import config as modes
+from digitize.consts import PI_DECIMAL
+from digitize.sentinel import _sentinel
+from digitize import units
+from digitize.units import Unit, UnitGroup, unit_modes, AllUnits
 
 
 def digitize(
     s: str,
-        *,
+    *,
     config: DigitizeMode  | DigitizeParams = default,
-    use_commas: bool = _sentinel,
-    fmt: str = _sentinel,
-    replace_multipliers: bool = _sentinel,
-    fmt_multipliers: str = _sentinel,
-
-    # Ordinals:
-    support_ordinals: bool = _sentinel,
-    fmt_ordinal: str | None  = _sentinel,     # one hundred seventy-second -> 172nd
-
-    # reps / "time(s)":
-    rep_signifiers: str | re.Pattern | Iterable[str | re.Pattern] = _sentinel,
-    support_reps: bool = _sentinel,
-    fmt_rep: str | None = _sentinel,     # default "%nx"    -> 3x   (for "3 times", "twice")
-    fmt_nth_time: str | None  = _sentinel,    # default "%n%ox"  -> 500th time (for "500th time")
-    rep_fmt: str = _sentinel,
-    rep_fmt_plural: bool = _sentinel,
-
-    attempt_to_differentiate_seconds: bool = _sentinel,
-
-    literal_fmt: bool | None  = _sentinel,
-    
-    support_roman: bool = _sentinel,
-    
-    parse_signs: bool = _sentinel,
-        power: str = _sentinel,
-    mult: str = _sentinel,
-    div: str = _sentinel,
-        combine_add: bool = _sentinel,
-        res: int = _sentinel,
-        do_simple_evals: bool = _sentinel,
-        do_fraction_evals: bool = _sentinel,
-        breaks: str | Iterable[str] = _sentinel,
-        units: Unit | UnitGroup | Iterable[Unit] = _sentinel,
-        _iter: bool = True
-
+    _iter: bool = True,
+    **kwargs # Accepts DigitizeParams args
 ) -> str:
     if not s.strip():
         return s
-    params = DigitizeParams(
-        use_commas=use_commas,
-        fmt=fmt,
-        replace_multipliers=replace_multipliers,
-        support_ordinals=support_ordinals,
-        fmt_ordinal=fmt_ordinal,
-        rep_signifiers=rep_signifiers,
-        support_reps=support_reps,
-        fmt_rep=fmt_rep,
-        fmt_nth_time=fmt_nth_time,
-        rep_fmt=rep_fmt,
-        rep_fmt_plural=rep_fmt_plural,
-        attempt_to_differentiate_seconds=attempt_to_differentiate_seconds,
-        literal_fmt=literal_fmt,
-        support_roman=support_roman,
-        parse_signs=parse_signs,
-        power=power,
-        mult=mult,
-        div=div,
-        combine_add=combine_add,
-        res=res,
-        do_simple_evals=do_simple_evals,
-        do_fraction_evals=do_fraction_evals,
-        breaks=breaks,
-        units=units
-    )
+    params = DigitizeParams(**kwargs)
     defaults = config if isinstance(config, DigitizeParams) else getattr(modes, config)
-    config = DigitizeParams(**{**defaults.non_sentinels(), **params.non_sentinels()})
-    description=config.description
-    use_commas=config.use_commas
-    fmt=config.fmt
-    replace_multipliers = config.replace_multipliers
-    fmt_multipliers = config.fmt_multipliers
-    support_ordinals = config.support_ordinals
-    fmt_ordinal=config.fmt_ordinal     # one hundred seventy-second -> 172nd
-    rep_signifiers = config.rep_signifiers
-    support_reps= config.support_reps
-    fmt_rep=config.fmt_rep      # default "%nx"    -> 3x   (for "3 times", "twice")
-    fmt_nth_time =config.fmt_nth_time    # default "%n%ox"  -> 500th time (for "500th time")
-    rep_fmt= config.rep_fmt
-    rep_fmt_plural = config.rep_fmt_plural
-    attempt_to_differentiate_seconds = config.attempt_to_differentiate_seconds
-    literal_fmt = config.literal_fmt
-    support_roman = config.support_roman
-    parse_signs = config.parse_signs
-    mult = config.mult
-    div = config.div
-    power = config.power
-    combine_add = config.combine_add
-    res = config.res
-    do_simple_evals = config.do_simple_evals
-    do_fraction_evals = config.do_fraction_evals
-    breaks = config.breaks
-    units=config.units
-    #__________________________________________________
-    if isinstance(breaks, str):
-        breaks = (breaks,)
+    config = DigitizeParams(**{**defaults.non_sentinels(), **params.non_sentinels()}).finalize()
 
-    if not breaks:
+    # __________________________________________________________________________________________________________________
+
+    if not config.breaks:
         chunks = [s]
         seps = []
     else:
         # split and keep delimiters
-        pattern = f"({'|'.join(map(re.escape, breaks))})"
+        pattern = f"({'|'.join(map(re.escape, config.breaks))})"
         parts = re.split(pattern, s)
 
         chunks = parts[::2]   # text
@@ -748,56 +55,28 @@ def digitize(
         return "".join(out)
 
     # _________________________________________
-    if not literal_fmt:
-        fmt = re.sub(r"\d+", "%n", fmt)
-    if fmt_multipliers is None:
-        fmt_multipliers = fmt
-    if not literal_fmt:
-        fmt_multipliers = re.sub(r"\d+", "%n", fmt_multipliers)
-    if fmt_ordinal is None:
-        fmt_ordinal = fmt.replace("%n", "%n%o")
-    if not literal_fmt:
-        fmt_ordinal = re.sub(r"\d+", "%n", fmt_ordinal)
-    if fmt_rep is None:
-        if rep_fmt == "x":
-            fmt_rep = fmt.replace("%n", "%nx")
-        else:
-            fmt_rep = fmt.replace("%n", f"%n {rep_fmt}%s" if rep_fmt_plural else f"%n {rep_fmt}")
-    if not literal_fmt:
-        fmt_rep = re.sub(r"\d+", "%n", fmt_rep)
-    if fmt_nth_time is None:
-        fmt_nth_time = re.sub("%n(%o)?", rf"%n\1 {rep_fmt}", fmt_ordinal)
-    if not literal_fmt:
-        fmt_nth_time = re.sub(r"\d+", "%n", fmt_nth_time)
-        
-    if parse_signs:
-        if not literal_fmt:
-            fmt = fmt.replace("%n", "%p%n")
-            fmt_multipliers = fmt_multipliers.replace("%n", "%p%n")
-            fmt_ordinal = fmt_ordinal.replace("%n", "%p%n")
-            fmt_rep = fmt_rep.replace("%n", "%p%n")
-            fmt_nth_time = fmt_nth_time.replace("%n", "%p%n")
+
 
     _SEC__sentinel = "__DIGITIZE_ECOND_UNIT__"
     _REPEAT_PREFIX = "__repeat__"
     _repeat_map: dict[str, str] = {}
 
-    if support_reps and rep_signifiers:
+    if config.support_reps and config.rep_signifiers:
         # Make a single alternation regex. Each signifier is treated as a full match.
         # Use a capturing group so we can store the exact matched text.
-        if isinstance(rep_signifiers, str):
+        if isinstance(config.rep_signifiers, str):
             rep_rx = re.compile(
-                rf"(?i)\b({rep_signifiers})\b"
+                rf"(?i)\b({config.rep_signifiers})\b"
             )
-        elif isinstance(rep_signifiers, re.Pattern):
-            rep_rx = rep_signifiers
-        elif isinstance(rep_signifiers, Iterable):
-            pats = [p.pattern if isinstance(p, re.Pattern) else p for p in rep_signifiers]
+        elif isinstance(config.rep_signifiers, re.Pattern):
+            rep_rx = config.rep_signifiers
+        elif isinstance(config.rep_signifiers, Iterable):
+            pats = [p.pattern if isinstance(p, re.Pattern) else p for p in config.rep_signifiers]
             rep_rx = re.compile(
                 r"(?i)\b(" + "|".join(pats) + r")\b"
             )
         else:
-            raise TypeError(f"rep_signifiers must be a string, pattern, or iterable of strings or patterns, not {type(rep_signifiers)}")
+            raise TypeError(f"rep_signifiers must be a string, pattern, or iterable of strings or patterns, not {type(config.rep_signifiers)}")
 
         def _rep_repl(m: re.Match) -> str:
             key = f"{_REPEAT_PREFIX}{len(_repeat_map)}_"
@@ -808,7 +87,7 @@ def digitize(
 
 
 
-    if attempt_to_differentiate_seconds:
+    if config.attempt_to_differentiate_seconds:
         # (a|one|per|each) second
         # Keep the left word intact and replace only "second" with a _sentinel.
         s = re.sub(
@@ -827,16 +106,16 @@ def digitize(
         )
 
     # --- expand capital suffixes BEFORE lowercasing (capital-only by regex) ---
-    if replace_multipliers:
+    if config.replace_multipliers:
         suffix_multipliers = {"k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
 
         def _expand_suffix(m):
             n = float(m.group(1))
             suf = m.group(2)
             value = int(n * suffix_multipliers[suf])
-            n_fmt = f"{value:,}" if use_commas else str(value)
+            n_fmt = f"{value:,}" if config.use_commas else str(value)
             m_fmt = suf
-            return fmt_multipliers.replace("%n", n_fmt).replace("%m", m_fmt).replace("%i", f"{m.group(1)}{m.group(2)}")
+            return config.fmt_multipliers.replace("%n", n_fmt).replace("%m", m_fmt).replace("%i", f"{m.group(1)}{m.group(2)}")
 
         s = re.sub(
             r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([kKMGTP])(?=[^A-Za-z0-9]|$)",
@@ -888,7 +167,7 @@ def digitize(
         "quadrillionth": 10**15, "quadrillionths": 10**15,
     }
 
-    if support_ordinals:
+    if config.support_ordinals:
         ordinal_word_to_num.update({
             "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
             "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
@@ -960,22 +239,22 @@ def digitize(
             return True
 
 
-        if support_reps and t in repeat_word_to_num:
+        if config.support_reps and t in repeat_word_to_num:
             return True
 
-        if support_ordinals and re.fullmatch(r"\d+(st|nd|rd|th)", t):
+        if config.support_ordinals and re.fullmatch(r"\d+(st|nd|rd|th)", t):
             return True
 
         if t.isdigit() or t in word_to_num or t == "hundred" or t in magnitude_value:
             return True
 
-        if support_ordinals and (t in ordinal_word_to_num or t in ordinal_magnitude_exact):
+        if config.support_ordinals and (t in ordinal_word_to_num or t in ordinal_magnitude_exact):
             return True
 
-        if support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", tok, flags=re.IGNORECASE):
+        if config.support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", tok, flags=re.IGNORECASE):
             return True
 
-        if support_roman and _ROMAN_PATTERN.fullmatch(tok):
+        if config.support_roman and _ROMAN_PATTERN.fullmatch(tok):
             return True
 
         return False
@@ -998,7 +277,7 @@ def digitize(
             return None
 
         # handle once/twice/thrice as standalone (or with trailing time/times)
-        if support_reps and norm_words:
+        if config.support_reps and norm_words:
             w0 = norm_words[0]
             if w0 in repeat_word_to_num:
                 if len(norm_words) == 1:
@@ -1007,7 +286,7 @@ def digitize(
                     return (repeat_word_to_num[w0], False, True)
 
         is_time_phrase = False
-        if support_reps and norm_words and _is_repeat_tail(norm_words[-1]):
+        if config.support_reps and norm_words and _is_repeat_tail(norm_words[-1]):
             is_time_phrase = True
             core = norm_words[:-1]
         else:
@@ -1219,7 +498,7 @@ def digitize(
                         continue
 
                     # reject ordinals for decimals in stage 1
-                    if support_ordinals:
+                    if config.support_ordinals:
                         if re.fullmatch(r"\d+(st|nd|rd|th)", w):
                             return None
                         if w in ordinal_word_to_num or w in ordinal_magnitude_exact:
@@ -1266,7 +545,7 @@ def digitize(
             if w == "and":
                 continue
 
-            if support_ordinals:
+            if config.support_ordinals:
                 mo = re.fullmatch(r"(\d+)(st|nd|rd|th)", w)
                 if mo:
                     current += int(mo.group(1))
@@ -1284,7 +563,7 @@ def digitize(
                 saw_any = True
                 continue
 
-            if support_ordinals and w in ordinal_word_to_num:
+            if config.support_ordinals and w in ordinal_word_to_num:
                 current += ordinal_word_to_num[w]
                 saw_any = True
                 is_ord = True
@@ -1296,7 +575,7 @@ def digitize(
                 current *= 100
                 continue
 
-            if support_ordinals and w in ordinal_magnitude_exact:
+            if config.support_ordinals and w in ordinal_magnitude_exact:
                 if not saw_any:
                     # bare "hundredth" => 1 * 100
                     current = ordinal_magnitude_exact[w]
@@ -1313,7 +592,7 @@ def digitize(
                 current = 0
                 continue
                 
-            if support_roman and _ROMAN_PATTERN.fullmatch(w):
+            if config.support_roman and _ROMAN_PATTERN.fullmatch(w):
                 current += roman_to_int(w)
                 saw_any = True
                 continue
@@ -1355,16 +634,16 @@ def digitize(
             if w in word_to_num or w == "hundred" or w in magnitude_value:
                 has_convertible = True
                 break
-            if support_ordinals and (w in ordinal_word_to_num or w in ordinal_magnitude_exact or re.fullmatch(r"\d+(st|nd|rd|th)", w)):
+            if config.support_ordinals and (w in ordinal_word_to_num or w in ordinal_magnitude_exact or re.fullmatch(r"\d+(st|nd|rd|th)", w)):
                 has_convertible = True
                 break
-            if support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", w, flags=re.IGNORECASE):
+            if config.support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", w, flags=re.IGNORECASE):
                 has_convertible = True
                 break
-            if support_reps and w in repeat_word_to_num:
+            if config.support_reps and w in repeat_word_to_num:
                 has_convertible = True
                 break
-            if support_roman and _ROMAN_PATTERN.fullmatch(w):
+            if config.support_roman and _ROMAN_PATTERN.fullmatch(w):
                 has_convertible = True
                 break
 
@@ -1390,7 +669,7 @@ def digitize(
                 numer_str, denom_val = n[1], n[2]
                 num = f"{numer_str}/{denom_val}"
                 out.append(
-                    fmt
+                    config.fmt
                     .replace("%n", num)
                     .replace("%s", "s")
                     .replace("%r", "x")
@@ -1401,11 +680,11 @@ def digitize(
             # decimals
             elif isinstance(n, tuple) and len(n) == 3 and n[0] == "DEC":
                 int_part, frac_digits = n[1], n[2]
-                int_part_str = f"{int_part:,}" if use_commas else str(int_part)
+                int_part_str = f"{int_part:,}" if config.use_commas else str(int_part)
                 num = f"{int_part_str}.{frac_digits}"
                 # decimals are never ordinals/reps in stage 1
                 out.append(
-                    fmt
+                    config.fmt
                     .replace("%n", num)
                     .replace("%s", "s")  # irrelevant but keep pipeline stable
                     .replace("%r", "x")
@@ -1413,7 +692,7 @@ def digitize(
                 )
             else:
                 # existing integer behavior
-                num = f"{n:,}" if use_commas else str(n)
+                num = f"{n:,}" if config.use_commas else str(n)
                 plural_s = "s" if abs(n) != 1 else ""
                 if _repeat_map:
                     x = "".join(raw)
@@ -1426,11 +705,11 @@ def digitize(
                     i = "".join(raw)
 
 
-                if is_time and support_reps:
-                    if is_ord and support_ordinals:
+                if is_time and config.support_reps:
+                    if is_ord and config.support_ordinals:
                         suf = ordinal_suffix(n)
                         out.append(
-                            fmt_nth_time
+                            config.fmt_nth_time
                             .replace("%n", num)
                             .replace("%o", suf)
                             .replace("%s", plural_s)
@@ -1439,17 +718,17 @@ def digitize(
                         )
                     else:
                         out.append(
-                            fmt_rep
+                            config.fmt_rep
                             .replace("%n", num)
                             .replace("%s", plural_s)
                             .replace("%r",  r)
                             .replace("%i", i)
                         )
                 else:
-                    if is_ord and support_ordinals:
+                    if is_ord and config.support_ordinals:
                         suf = ordinal_suffix(n)
                         out.append(
-                            fmt_ordinal
+                            config.fmt_ordinal
                             .replace("%n", num)
                             .replace("%o", suf)
                             .replace("%s", plural_s)
@@ -1458,7 +737,7 @@ def digitize(
                         )
                     else:
                         out.append(
-                            fmt
+                            config.fmt
                             .replace("%n", num)
                             .replace("%s", plural_s)
                             .replace("%r",  r)
@@ -1516,7 +795,7 @@ def digitize(
         if p in tens_words:
             if nxt.isdigit() or nxt in word_to_num:
                 return True
-            if support_ordinals and nxt in ordinal_word_to_num:
+            if config.support_ordinals and nxt in ordinal_word_to_num:
                 return True
         return False
 
@@ -1544,7 +823,7 @@ def digitize(
             # special handling for "time/times":
             # only include it as part of phrase if the phrase so far parses as a number (cardinal/ordinal/repeat word)
             # special handling for "time/times" sentinels
-            if support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", t, flags=re.IGNORECASE):
+            if config.support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", t, flags=re.IGNORECASE):
                 nxt = _next_nonspace(i)
 
                 # If another numeric atom follows, this is NOT repetition; it's "A times B"
@@ -1623,25 +902,18 @@ def digitize(
 
     s = "".join(out).replace("%p", "")
 
-    if attempt_to_differentiate_seconds:
+    if config.attempt_to_differentiate_seconds:
         s = re.sub(_SEC__sentinel, "second", s)
 
-    all_units = []
-    if isinstance(units, UnitGroup | Unit):
-        all_units = units.children
-    else:
-        for u in units:
-            all_units.extend(u.children)
+    all_units = AllUnits(config.units)
 
-    all_units = list(sorted(all_units, key=lambda u: len(u.key), reverse=True))
-
-
-    # print("pre sub", s)
     for u in all_units:
-        # print(f"checking unit {u.key}, {u.full_pattern}, {u.full_replacement}, {s=}")
-        s = u.sub(s, all_units)
-        # print(f"{s=}")
-    # print("post sub", s)
+        s2 = u.sub(s, all_units)
+        if s2 != s:
+            s = s2
+    s2 = re.sub(r" a set\(s\) of ", " ", s)
+    if s2 != s:
+        s = s2
 
     if _repeat_map:
         s = re.sub(
@@ -1652,7 +924,7 @@ def digitize(
 
     s = s.replace("%p", "")
 
-    if parse_signs:
+    if config.parse_signs:
         num_rx = r"(\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
         s = re.sub(rf"\b(neg|negative|minus)\s+{num_rx}\b", r"-\2", s, flags=re.IGNORECASE)
         s = re.sub(rf"\b(pos|positive|plus)\s+{num_rx}\b", r"+\2", s, flags=re.IGNORECASE)
@@ -1662,14 +934,14 @@ def digitize(
     # x over y  /  x divided by y  ->  x/y
     s = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+(?:over|divided\s+by)\s+(\d+(?:\.\d+)?)\b",
-        rf"\1{div}\2",
+        rf"\1{config.div}\2",
         s,
         flags=re.IGNORECASE,
     )
     # x over y  /  x divided by y  ->  x/y
     s = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+(?:over|divided\s+by|out of|into|of)\s+(\d+(?:\.\d+)?)\b",
-        rf"\1{div}\2",
+        rf"\1{config.div}\2",
         s,
         flags=re.IGNORECASE,
     )
@@ -1722,13 +994,13 @@ def digitize(
     )
     s = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)?(?: (?:power|exponent|degree))?\b",
-        rf"\1{power}\2",
+        rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
     s = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)\b",
-        rf"\1{power}\2",
+        rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
@@ -1736,7 +1008,7 @@ def digitize(
     for k, v in powers.items():
         s = re.sub(
             rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)?\s({k})(?: power)?\b",
-            rf"\1{power}{v}",
+            rf"\1{config.power}{v}",
             s,
             flags=re.IGNORECASE,
         )
@@ -1748,7 +1020,7 @@ def digitize(
     # square root of x  ->  sqrt(x)
     s = re.sub(
         rf"\b(square)\s+root(?:\s+of)?{ws}({num_atom})\b",
-        rf"\2{power}(1/2)",
+        rf"\2{config.power}(1/2)",
         s,
         flags=re.IGNORECASE,
     )
@@ -1756,7 +1028,7 @@ def digitize(
     # cube root of x  ->  cbrt(x)
     s = re.sub(
         rf"\b(cube)\s+root(?:\s+of)?{ws}({num_atom})\b",
-        rf"\2{power}(1/3)",
+        rf"\2{config.power}(1/3)",
         s,
         flags=re.IGNORECASE,
     )
@@ -1765,7 +1037,7 @@ def digitize(
     # "the 5th root of 32", "5th root of 32", "5 root of 32" (if you want)
     s = re.sub(
         rf"\b(?:the\s+)?({num_atom})(?:st|nd|rd|th)?\s+root(?:\s+of)?{ws}({num_atom})\b",
-        rf"\2{power}(1/\1)",
+        rf"\2{config.power}(1/\1)",
         s,
         flags=re.IGNORECASE,
     )
@@ -1785,7 +1057,7 @@ def digitize(
     # 2) "6e-5" -> "6{mult}10{power}-5"
     s = re.sub(
         rf"\b([+-]?\d+(?:\.\d+)?)(?:e([+-]?\d+))\b",
-        lambda m: f"{m.group(1)}{mult}10{power}{m.group(2)}",
+        lambda m: f"{m.group(1)}{config.mult}10{config.power}{m.group(2)}",
         s,
         flags=re.IGNORECASE,
     )
@@ -1794,15 +1066,15 @@ def digitize(
     ten_pow = rf"10(?:\s*)?(?:\^|\*\*)(?:\s*)?(\(?[+-]?\d+\)?)"
     s = re.sub(
         rf"\b({num_atom_sci})\s*(?:\*|x|×)\s*{ten_pow}\b",
-        lambda m: f"{m.group(1)}{mult}(10{power}{m.group(2)})",
+        lambda m: f"{m.group(1)}{config.mult}(10{config.power}{m.group(2)})",
         s,
         flags=re.IGNORECASE,
     )
 
     # --- ACTUAL_MATH: mixed numbers like "1 and 1/2" ---
     # supports: "1 and 1/2", "1 and 2/3", etc.
-    if combine_add is not False:  # default True
-        _res = 3 if res is _sentinel else int(res) if res is not None else res
+    if config.combine_add is not False:  # default True
+        _res = 3 if config.res is _sentinel else int(config.res) if config.res is not None else config.res
     else:
         _res = None
 
@@ -1848,7 +1120,7 @@ def digitize(
     # This avoids touching phrases like "rock and roll".
     s = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+and\s+([+-]?\d+(?:\.\d+)?)/(\d+)\b",
-        lambda f: _mixed_repl(f, res),
+        lambda f: _mixed_repl(f, config.res),
         s,
         flags=re.IGNORECASE,
     )
@@ -1866,11 +1138,11 @@ def digitize(
         val = whole + (a / b)
 
         # if you have combine_add/res, use them; otherwise just default to 3 decimals
-        if "combine_add" in locals() and combine_add is False:
+        if config.combine_add is False:
             whole_out = "1" if whole_txt == "a" else m.group(1)
             return f"{whole_out} {unit} and {a}/{b}"
 
-        places = res if ("res" in locals() and isinstance(res, int)) else 3
+        places = config.res if ("res" in locals() and isinstance(config.res, int)) else 3
         out = f"{val:.{places}f}".rstrip("0").rstrip(".")
 
         plural_unit = unit
@@ -1892,7 +1164,7 @@ def digitize(
 
     s = re.sub(
         r"(\d+(?:\/|\.)\d+) of (?:an?\s?set(?:\(s\))?s? of )?(\d+)",
-        rf"(\1){mult}\2",
+        rf"(\1){config.mult}\2",
         s,
         flags=re.IGNORECASE,
     )
@@ -1904,78 +1176,49 @@ def digitize(
     )
 
 
-    if do_simple_evals:
+    if config.do_simple_evals:
         # print("se", s)
-        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
         # print("postse", s)
 
     s = re.sub(
         rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
-        rf"\1{mult}\2",
+        rf"\1{config.mult}\2",
         s,
         flags=re.IGNORECASE,
     )
 
-    if do_simple_evals:
+    if config.do_simple_evals:
         # print("se", s)
-        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
 
     # replace hanging
     s = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
-    def merge_units(s, u):
+    def merge_units(s, u, v=1):
         if isinstance(u, UnitGroup):
-            s = u.base.base_merge(s)
+            s = u.base.base_merge(s) if v==1 else u.base.base_merge2(s)
         elif isinstance(u, Unit):
-            s = u.base_merge(s)
+            s = u.base_merge(s) if v==1 else u.base_merge2(s)
         else:
             for u2 in u:
-                s = merge_units(s, u2)
+                s = merge_units(s, u2, v=v)
         return s
-    def merge_units2(s, u):
-        if isinstance(u, UnitGroup):
-            s = u.base.base_merge2(s)
-        elif isinstance(u, Unit):
-            s = u.base_merge2(s)
-        else:
-            for u2 in u:
-                s = merge_units2(s, u2)
-        return s
-    base_units = [u for u in all_units if u.base]
-    known_bu_keys = set()
-    for bu in base_units:
-        if isinstance(bu.key, str):
-            known_bu_keys.add(bu.key)
-        else:
-            for buk in bu.key:
-                known_bu_keys.add(buk)
-
-
-    new_units = set()
-    for u in all_units:
-        nu = u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else ""
-        if nu:
-            if isinstance(nu, str):
-                new_units.add(nu)
-            else:
-                for nuk in nu:
-                    new_units.add(nuk)
-    # u.new_unit if isinstance(u.new_unit, str) else u.new_unit.key if hasattr(u.new_unit, "key") else "" for u in all_units)
-    new_units = [nu for nu in new_units if nu not in known_bu_keys]
-    more_bases = [Unit(k, base=True) for k in new_units]
+    all_base_units = all_units.all_base_units()
     # print("more bases", new_units)
 
-    s = merge_units(s, base_units)
-    s = merge_units(s, more_bases)
-    # print("pre-merg2", s)
-    s = merge_units2(s, base_units)
-    s = merge_units2(s, more_bases)
-    # print("post-merg2", s)
-    if do_simple_evals:
+    s2 = merge_units(s, all_base_units)
+    if s2 != s:
+        # print(f"merged, '{s}' => '{s2}'")
+        s = s2
+    s2 = merge_units(s, all_base_units, v=2)
+    if s2 != s:
+        # print(f"merge2d, '{s}' => '{s2}'")
+        s = s2
+    if config.do_simple_evals:
         # print("se", s)
-        s = simple_eval(s, power=power, mult=mult, div=div, eval_fractions=do_fraction_evals,res=res)
+        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
 
-    s = merge_units(s, base_units)
-    s = merge_units(s, more_bases)
+    s = merge_units(s, all_base_units)
 
     if not _iter:
         return s
@@ -1987,16 +1230,42 @@ def digitize(
     prevs = [s]
     while i < 100:
         if s2 == s:
-            return s
+            break
         if s2 in prevs:
-            return first
+            s=first
+            break
         if len(s2) > len(s):
             return s
         prevs.append(s2)
         s = s2
         s2 = digitize(s, config=config, _iter=False)
         i += 1
-    raise StopIteration(f"hit {i}")
+    else:
+        raise StopIteration(f"hit {i}")
+
+    # print("almost final", s)
+    if config.unit_mode  != unit_modes.BASE:
+        groups = [] if isinstance(config.units, Unit) else [g for g in config.units if isinstance(g, UnitGroup)] if not isinstance(config.units, UnitGroup) else [config.units]
+        for g in groups:
+            # get the first child for each value
+            mapping = {k: v if isinstance(v, str) else list(v)[0] for k, v in g.names.items()}
+            k = g.base.key
+            mapping[1] = k
+
+            mapping = dict(sorted(mapping.items(), reverse=True)) # e.g. {0.000001: 'µs', 0.001: 'ms', 1: 's', 60: 'm', 3600: 'h', 24*3600: 'd', 7*24*3600: 'w'}
+            levels = list(mapping.keys()) # [7*24*3600, 23*3600, 3600, 60, 1, 0.001, 0.000001]
+            names = list(mapping.values()) # ['w', 'd', 'h', 'm', 's', 'ms', 'µs']
+
+            repl = repl_factory(levels, names, unit_max_cascade=config.unit_max_cascade)  # or 1/2/3...
+
+            s = re.sub(
+                rf"(\d+(?:(?:\.|\/)\d+)?)\s*{k}(?![A-Za-z])",
+                lambda m: repl(m, res=config.res, int_cascade_mode=config.int_cascade_mode),
+                s,
+            )
+
+
+    return s
 
 
 
@@ -2088,8 +1357,6 @@ def _fraction_to_exact_str(x: Fraction) -> str:
     out = out.rstrip("0").rstrip(".")
     return sign + out
 
-from fractions import Fraction
-from math import isqrt
 
 def _int_nth_root_exact(n: int, k: int) -> int | None:
     """Return exact integer r such that r**k == n, else None. n>=0, k>=1."""
@@ -2157,6 +1424,109 @@ def _pow_fraction_exact(base: Fraction, exp: Fraction) -> Fraction | None:
         return Fraction(1, 1) / (rooted ** (-p))
 
 
+def parse_num_to_fraction(num: str) -> Fraction:
+    if "/" in num:
+        a, b = num.split("/", 1)
+        return Fraction(int(a), int(b))
+    if "." in num:
+        d = Decimal(num)
+        # exact conversion: Decimal -> Fraction
+        n, den = d.as_integer_ratio()
+        return Fraction(n, den)
+    return Fraction(int(num), 1)
+
+
+def frac_to_decimal_str(fr: Fraction, places: int) -> str:
+    # exact Decimal division, then quantize
+    getcontext().prec = max(50, places + 20)
+    d = (Decimal(fr.numerator) / Decimal(fr.denominator)).quantize(
+        Decimal("1." + "0" * places),
+        rounding=ROUND_HALF_UP,
+    )
+    # keep fixed digits (matches your examples like 5.29380)
+    return format(d, "f")
+
+def frac_to_exact_str(fr: Fraction) -> str:
+    if fr.denominator == 1:
+        return str(fr.numerator)
+    # allow decimals ONLY if exact terminating (no rounding error)
+    if _is_terminating_decimal(fr):
+        getcontext().prec = 80
+        d = Decimal(fr.numerator) / Decimal(fr.denominator)
+        return format(d.normalize(), "f")
+    return f"{fr.numerator}/{fr.denominator}"
+
+def level_to_frac(x) -> Fraction:
+    # NEVER do Fraction(float). Use Decimal(str(float)) so 0.001 -> exactly 1/1000.
+    if isinstance(x, Fraction):
+        return x
+    if isinstance(x, int):
+        return Fraction(x, 1)
+    if isinstance(x, Decimal):
+        n, d = x.as_integer_ratio()
+        return Fraction(n, d)
+    if isinstance(x, float):
+        # critical: str(x) gives the human decimal, not the full binary repr
+        d = Decimal(str(x))
+        n, den = d.as_integer_ratio()
+        return Fraction(n, den)
+    if isinstance(x, str):
+        # allow "0.001", "1e-6"
+        d = Decimal(x)
+        n, den = d.as_integer_ratio()
+        return Fraction(n, den)
+    raise TypeError(f"Unsupported level type: {type(x)}")
+
+def repl_factory(levels, names, *, unit_max_cascade: int | Literal["base"] = None):
+    # Freeze exact Fractions for ALL levels (no float leakage)
+    L = [level_to_frac(x) for x in levels]   # DESC
+    N = list(names)
+
+    def repl(m: re.Match, res: int | None = 1, *, int_cascade_mode: bool = False) -> str:
+        num_s = m.group(1)
+        n = parse_num_to_fraction(num_s)  # this must also avoid float internally
+
+        if n == 0:
+            return f"0{N[-1]}"
+
+        start = next((i for i, lvl in enumerate(L) if n >= lvl), len(L) - 1)
+
+        if unit_max_cascade is None:
+            max_units = len(L) - start
+        elif unit_max_cascade == "base":
+            # allow cascading down to (and including) 1 second, but not below
+            base = Fraction(1, 1)
+            max_units = sum(1 for x in L[start:] if base <= x <= L[start])
+            max_units = max(1, max_units)
+        else:
+            max_units = max(1, int(unit_max_cascade))
+
+        end = min(len(L), start + max_units)
+        single_level = (end - start) == 1
+
+        out: list[str] = []
+        remaining = n
+
+        for i in range(start, end):
+            lvl = L[i]
+            unit = N[i]
+
+            if int_cascade_mode or not single_level:
+                q = remaining // lvl
+                if q:
+                    out.append(f"{q}{unit}")
+                    remaining -= q * lvl
+                continue
+
+            # single-level: allow fractional/decimal
+            v = remaining / lvl
+            v_str = frac_to_exact_str(v) if res is None else frac_to_decimal_str(v, res)
+            out.append(f"{v_str}{unit}")
+            break
+
+        return "".join(out) if out else f"0{N[-1]}"
+
+    return repl
 
 def _dec_pow_rational_exp(base: Fraction, exp: Fraction, res: int) -> Fraction:
     """
@@ -2670,6 +2040,9 @@ MORE = [
     ("an hour and a half less than two hours",{"units": Unit("hour", base=True)}, "0.5 hours" ),
     ("5.5 minutes less than two hours",{"units": Unit("hour", value=60, new_unit="minute")}, "114.5 minutes" ),
     ("5 minutes and 35 seconds less than two hours",{"units": units.seconds}, "6865 s" ),
+    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE}, "1h54m25s" ),
+    ("5 minutes and 35.5 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": None,}, "1h54m24s500ms" ),
+    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": 2, }, "1h54m" ),
 ]
 
 TESTS = [
@@ -2925,11 +2298,11 @@ def build_md_table(suite):
 
 
 if __name__ == "__main__":
-    print(build_md_table(TESTS))
+    # print(build_md_table(TESTS))
     # # pass
     # # loop(config="units", raise_exc=True)
     # # loop(raise_exc=True)
     # # print("simple_eval", simple_eval("5*12 donuts"))
-    # if not sys.argv[1:]:
-    #     raise SystemExit(main(["", "-m", "demo"]))
-    # raise SystemExit(main())
+    if not sys.argv[1:]:
+        raise SystemExit(main(["", "-m", "demo"]))
+    raise SystemExit(main())

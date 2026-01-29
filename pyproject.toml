@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=45", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "modularizer-digitize"
 version = "0.1.0"
@@ -20,3 +24,6 @@ digitize = "digitize:main"
 line-length = 100
 target-version = ['py310']
 
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["digitize*"]
