@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Literal
 from digitize.sentinel import _sentinel
 from digitize import units
+from digitize.stages import StageName
 from digitize.units import Unit, UnitGroup, UnitMode, unit_modes
 
 SIMPLE_REP_PATTERN = r"(?:time|occurence|instance)s?"
@@ -55,10 +56,12 @@ class DigitizeParams:
     breaks: str | re.Pattern | Iterable[str | re.Pattern] = _sentinel
     units: Unit | UnitGroup | Iterable[Unit] = _sentinel
     unit_mode: UnitMode = _sentinel
-    unit_max_cascade: int | None = _sentinel
+    unit_max_cascade: Literal["base"] | int | None = _sentinel
     int_cascade_mode: bool = _sentinel
 
-    log_stages: bool = _sentinel
+    skip_stages: Iterable[StageName] = _sentinel,
+    log_stages: bool | Iterable[StageName] = _sentinel,
+    log_context: bool | Iterable[StageName]  = _sentinel,
 
     def non_sentinels(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not _sentinel}
@@ -151,6 +154,9 @@ default = DigitizeParams(
     unit_mode=unit_modes.BASE,
     unit_max_cascade="base",
     int_cascade_mode=True,
+    skip_stages = (),
+    log_stages = True,
+    log_context = True,
 )
 
 

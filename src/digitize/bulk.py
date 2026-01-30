@@ -1,13 +1,16 @@
 #!/usr/bin/env python3
 import re
 import sys
+from collections.abc import Iterable
+from dataclasses import dataclass
 from fractions import Fraction
-from typing import Tuple
+from typing import Literal, Tuple, Any
 
 from digitize.config import DigitizeMode, DigitizeParams, default
 from digitize import config as modes
 from digitize.patterns import chunk_string, merge_chunks, any_word
 from digitize.sentinel import _sentinel
+from digitize.stages import StageResult, StageName, Stage
 from digitize.tasks.fractions import frac_to_exact_str
 from digitize.tasks.replace_multipliers import replace_multipliers
 from digitize.tasks.simple_eval import simple_eval
@@ -21,38 +24,17 @@ from digitize.consts import N019, FRACTION_DEN_WORD, TENS_WORDS, DIGIT_WORD_TO_D
 _SEC__sentinel = "__DIGITIZE_ECOND_UNIT__"
 _REPEAT_PREFIX = "__repeat__"
 
+
+
 def digitize(
     s: str,
     *,
     config: DigitizeMode  | DigitizeParams = default,
     _iter: bool = True,
-    log_stages: bool = True,
-    log_context: bool = True,
-    call_level: str = "",
-    stages: list[str] = None,
+    call_level: int = 0,
+    stages: list[StageResult] = None,
     **kwargs # Accepts DigitizeParams args
 ) -> str:
-    stages = [] if stages is None else stages
-
-    def record_stage(old, new: str | tuple[str], stage: str = "", context = None) -> str:
-        if old == new:
-            return old
-        ctx = (stage + ((f"({context!r})" if context else "") if log_context else ""))
-        if ctx:
-            ctx += ": "
-        n = f"'{new}'" if isinstance(new, str) else new
-        d = f"{call_level}{ctx}'{old}' -> {n}"
-        if log_stages:
-            print(d)
-        stages.append((new, ctx))
-        return new
-
-    s = record_stage("", s, "input")
-
-    if not s.strip():
-        return s
-
-
     # first, merge params with the default config profile selected
     # basically there are two toggles.
     # config selects a full set of params, and then **kwargs perform overrides
@@ -60,13 +42,46 @@ def digitize(
     defaults = config if isinstance(config, DigitizeParams) else getattr(modes, config)
     config = DigitizeParams(**{**defaults.non_sentinels(), **params.non_sentinels()}).finalize()
 
+    # we accept a mutable list of stages as a way to return info to the caller to help debug
+    stages = [] if stages is None else stages
+
+    def record_stage(old, new: str | tuple[str], stage: StageName = "", context = None) -> str:
+        changed = old != new
+        r = StageResult(
+          prev=stages[-1] if stages else None,
+          changed=changed,
+          new=new if changed else None,
+          stage=stage,
+          ctx=context,
+          skipped=False,
+        call_level=call_level,
+        )
+        if changed and (config.log_stages is True or (config.log_stages and stage in config.log_stages)):
+            print(r.get_explanation(log_context=config.log_context))
+        stages.append(r)
+        return new
+
+    if not stages:
+        s = record_stage("", s, Stage.INPUT)
+
+    if not s.strip():
+        return s
+
+
+    recurse_kwargs = {
+        "config": config,
+        "call_level": call_level + 1,
+        "stages": stages,
+        "_iter": False
+    }
+    recurse = lambda _s, **kw: digitize(_s, **recurse_kwargs, **kw)
+
     # breaks allows setting up break words to indepenently analyze different sections then stitch back together
     # e.g. use ". " to separately analyze each sentence
     chunks, seps = chunk_string(s, config.breaks)
     if len(chunks) > 1:
-        chunks = record_stage(s, chunks, "split by breaks", f"breaks={config.breaks}, seps={seps}")
-        return merge_chunks([digitize(c, config=config, log_stages=log_stages, log_context=log_context, call_level=f"\t[chunk#{i}]")
-                             for i, c in enumerate(chunks)], seps=seps)
+        chunks = record_stage(s, chunks, Stage.SPLIT_BY_BREAKS, f"breaks={config.breaks}, seps={seps}")
+        return merge_chunks([recurse(c) for c in chunks], seps=seps)
 
 
 
@@ -85,7 +100,7 @@ def digitize(
             return key
 
         s2 = rep_rx.sub(_rep_repl, s)
-        s = record_stage(s, s2, "repeat_sentinel_preprocessed", rep_rx)
+        s = record_stage(s, s2, Stage.REPEAT_SENTINEL_PREPROCESSED, rep_rx)
 
     def _is_repeat_tail(w: str) -> bool:
         return re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", w, flags=re.IGNORECASE) is not None
@@ -94,12 +109,12 @@ def digitize(
     if config.attempt_to_differentiate_seconds:
         s2 = re.sub(r"\b(a|one|per|each)\s+second\b",rf"\1 {_SEC__sentinel}", s, flags=re.IGNORECASE)
         s3 = re.sub(r"\b(the)\s+second\s+(after|before|between|when)\b",rf"\1 {_SEC__sentinel} \2", s2,flags=re.IGNORECASE,)
-        s = record_stage(s, s3, "attempt_to_differentiate_seconds")
+        s = record_stage(s, s3, Stage.ATTEMPT_TO_DIFFERENTIATE_SECONDS)
 
     # --- expand capital suffixes BEFORE lowercasing (capital-only by regex) ---
     if config.replace_multipliers:
         s2 = replace_multipliers(s, fmt_multipliers=config.fmt_multipliers, use_commas=config.use_commas)
-        s = record_stage(s, s2, "replace_multipliers")
+        s = record_stage(s, s2, Stage.REPLACE_MULTIPLIERS)
 
 
     word_to_num = {w: i for i, w in enumerate(N019)}
@@ -762,11 +777,11 @@ def digitize(
         out.append(pending_ws)
 
     s2 = "".join(out).replace("%p", "").replace("%p", "")
-    s = record_stage(s, s2,"main loop")
+    s = record_stage(s, s2, Stage.MAIN_LOOP)
 
     if config.attempt_to_differentiate_seconds:
         s2 = re.sub(_SEC__sentinel, "second", s)
-        s = record_stage(s, s2,"re-sub seconds")
+        s = record_stage(s, s2, Stage.RESUB_SECONDS)
 
     all_units = AllUnits(flatten_units(config.units))
     # print(f"{all_units=}")
@@ -774,9 +789,9 @@ def digitize(
 
     for u in all_units:
         s2 = u.sub(s, all_units)
-        s = record_stage(s, s2,"unit sub", u.key)
+        s = record_stage(s, s2, Stage.UNIT_SUB, u.key)
     s2 = re.sub(r" a set\(s\) of ", " ", s)
-    s = record_stage(s, s2,"a set(s) of")
+    s = record_stage(s, s2, Stage.A_SET_OF)
 
     if _repeat_map:
         s2 = re.sub(
@@ -784,17 +799,17 @@ def digitize(
             lambda m: _repeat_map.get(m.group(0), m.group(0)),
             s,
         )
-        s = record_stage(s, s2,"re-sub repeat map")
+        s = record_stage(s, s2, Stage.RESUB_REPEAT_MAP)
 
     if config.parse_signs:
         num_rx = r"(\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
         s2 = re.sub(rf"\b(neg|negative|minus)\s+{num_rx}\b", r"-\2", s, flags=re.IGNORECASE)
-        s = record_stage(s, s2,"negative")
+        s = record_stage(s, s2, Stage.NEGATIVE)
         s2 = re.sub(rf"\b(pos|positive|plus)\s+{num_rx}\b", r"+\2", s, flags=re.IGNORECASE)
-        s = record_stage(s, s2,"positive")
+        s = record_stage(s, s2, Stage.POSITIVE)
         s2 = re.sub(rf"\+\s+{num_rx}\b", r"+\1", s, flags=re.IGNORECASE)
         s3 = re.sub(rf"-\s+{num_rx}\b", r"-\1", s2, flags=re.IGNORECASE)
-        s = record_stage(s, s3,"+- space")
+        s = record_stage(s, s3, Stage.PLUS_MINUS_SPACE)
 
     # x over y  /  x divided by y  ->  x/y
     s2 = re.sub(
@@ -803,7 +818,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"divided by")
+    s = record_stage(s, s2, Stage.DIVIDED_BY)
     # x over y  /  x divided by y  ->  x/y
     s2 = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+(?:over|divided\s+by|out of|into|of)\s+(\d+(?:\.\d+)?)\b",
@@ -811,7 +826,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"divided by")
+    s = record_stage(s, s2, Stage.DIVIDED_BY)
 
     # multiplication: "<num> times <num>" or "<num> multiplied by <num>" -> "<num>*<num>"
     num_atom = r"(?:[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
@@ -828,7 +843,7 @@ def digitize(
         s2,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s3,"+- space")
+    s = record_stage(s, s3, Stage.PLUS_MINUS_SPACE)
 
     def _frac_exponent_to_ordinal(m: re.Match) -> str:
         base = m.group(1)
@@ -859,21 +874,21 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"power-a")
+    s = record_stage(s, s2, Stage.POWER_A)
     s2 = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)?(?: (?:power|exponent|degree))?\b",
         rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"power-b")
+    s = record_stage(s, s2, Stage.POWER_B)
     s2 = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)\b",
         rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"power-c")
+    s = record_stage(s, s2, Stage.POWER_C)
 
     for k, v in POWERS.items():
         s2 = re.sub(
@@ -882,7 +897,7 @@ def digitize(
             s,
             flags=re.IGNORECASE,
         )
-        s = record_stage(s, s2, "power-d", k)
+        s = record_stage(s, s2, Stage.POWER_D, k)
 
     # helpers
     ws = r"\s+"
@@ -895,7 +910,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"square root")
+    s = record_stage(s, s2, Stage.SQUARE_ROOT)
 
     # cube root of x  ->  cbrt(x)
     s2 = re.sub(
@@ -904,7 +919,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"cubed root")
+    s = record_stage(s, s2, Stage.CUBED_ROOT)
 
     # nth root of x  ->  root(n,x)
     # "the 5th root of 32", "5th root of 32", "5 root of 32" (if you want)
@@ -914,7 +929,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"nth root")
+    s = record_stage(s, s2, Stage.NTH_ROOT)
 
 
     # --- Scientific notation normalization (place right before return) ---
@@ -927,7 +942,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"sci-a")
+    s = record_stage(s, s2, Stage.SCI_A)
 
     # 2) "6e-5" -> "6{mult}10{power}-5"
     s2 = re.sub(
@@ -936,7 +951,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"sci-b")
+    s = record_stage(s, s2, Stage.SCI_B)
 
     # 3) "6*10^5", "6×10**(5)", "6 x 10^5" -> "6{mult}10{power}5"
     ten_pow = rf"10(?:\s*)?(?:\^|\*\*)(?:\s*)?(\(?[+-]?\d+\)?)"
@@ -946,7 +961,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"sci-c")
+    s = record_stage(s, s2, Stage.SCI_C)
 
     # --- ACTUAL_MATH: mixed numbers like "1 and 1/2" ---
     # supports: "1 and 1/2", "1 and 2/3", etc.
@@ -1001,7 +1016,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"and-a")
+    s = record_stage(s, s2, Stage.AND_A)
 
     # --- unit mixed-number: (a|N) <unit> and a/b  ->  (N + a/b) <unit> ---
     # Assumes "half" etc is already replaced into "1/2" earlier.
@@ -1038,7 +1053,7 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"and-b")
+    s = record_stage(s, s2, Stage.AND_B)
     # print("testing", s)
 
     s2 = re.sub(
@@ -1047,20 +1062,20 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"of")
+    s = record_stage(s, s2, Stage.OF)
     s2 = re.sub(
         r"(\d+) and (\d+(?:\.|\/)\d+)",
         rf"\1 + \2",
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"and-c")
+    s = record_stage(s, s2, Stage.AND_C)
 
 
     if config.do_simple_evals:
         # print("se", s)
         s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
-        s = record_stage(s, s2,"simple-evals")
+        s = record_stage(s, s2, Stage.SIMPLE_EVALS)
         # print("postse", s)
 
     s2 = re.sub(
@@ -1069,16 +1084,16 @@ def digitize(
         s,
         flags=re.IGNORECASE,
     )
-    s = record_stage(s, s2,"times")
+    s = record_stage(s, s2, Stage.TIMES)
 
     if config.do_simple_evals:
         # print("se", s)
         s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
-        s = record_stage(s, s2,"simple-evals-2")
+        s = record_stage(s, s2, Stage.SIMPLE_EVALS_2)
 
     # replace hanging
     s2 = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
-    s = record_stage(s, s2,"hanging-set")
+    s = record_stage(s, s2, Stage.HANGING_SET)
 
     def merge_units(s, u, v=1):
         if isinstance(u, UnitGroup):
@@ -1093,21 +1108,21 @@ def digitize(
     # print("more bases", new_units)
 
     s2 = merge_units(s, all_base_units)
-    s = record_stage(s, s2,"merge-units")
+    s = record_stage(s, s2, Stage.MERGE_UNITS)
     s2 = merge_units(s, all_base_units, v=2)
-    s = record_stage(s, s2,"merge-units-2")
+    s = record_stage(s, s2, Stage.MERGE_UNITS_2)
 
 
     if config.do_simple_evals:
         s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
-        s = record_stage(s, s2,"simple-evals-3")
+        s = record_stage(s, s2, Stage.SIMPLE_EVALS_3)
 
     s2 = merge_units(s, all_base_units)
-    s = record_stage(s, s2,"merge-units-b")
+    s = record_stage(s, s2, Stage.MERGE_UNITS_B)
     if not _iter:
         return s
     first = s
-    s2 = digitize(s, config=config, _iter=False)
+    s2 = recurse(s)
     # print("ITER 0", s)
     # print("ITER 1", s2)
     i = 0
@@ -1121,8 +1136,8 @@ def digitize(
         if len(s2) > len(s):
             return s
         prevs.append(s2)
-        s = record_stage(s, s2,"iter", i)
-        s2 = digitize(s, config=config, _iter=False)
+        s = record_stage(s, s2, Stage.ITER, i)
+        s2 = recurse(s)
         i += 1
     else:
         raise StopIteration(f"hit {i}")
@@ -1147,7 +1162,7 @@ def digitize(
                 lambda m: repl(m, res=config.res, int_cascade_mode=config.int_cascade_mode),
                 s,
             )
-            s = record_stage(s, s2,"unit_merge", g)
+            s = record_stage(s, s2, Stage.UNIT_MERGE, g)
 
 
     return s
