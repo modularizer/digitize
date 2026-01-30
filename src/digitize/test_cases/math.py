@@ -1,0 +1,36 @@
+MATH = [
+    ("five times", {}, "5 times"),
+    ("five times ten", {"do_simple_evals": False}, "5*10"),
+    ("five times ten", {}, "50"),
+    ("two point eight multiplied by twenty two point 7", {"do_simple_evals": False}, "2.8*22.7"),
+    ("two point eight multiplied by twenty two point 7", {}, "63.56"),
+    ("five occurences of 10", {}, "50"),
+    ("seven of nine", {}, "7/9"),
+    ("6 into 11", {}, "6/11"),
+    ("seven point five plus 8", {}, "15.5"),
+    ("two to the power of 3", {"do_simple_evals": False}, "2**3"),
+    ("two to the power of 3", {"power": "^", "do_simple_evals": False}, "2^3"),
+    ("two to the third power", {"power": "^"}, "8"),
+    ("two to the third", {"power": "^"}, "8"),
+    ("two to the five hundredth power", {"power": "^", "do_simple_evals": False}, "2^500"),
+    ("two to the one hundred twenty-seventh power", {"power": "^", "do_simple_evals": False}, "2^127"),
+    ("two to the one hundred twenty-seventh power", {"power": "^"}, "170141183460469231731687303715884105728"),
+    ("two to the one thousand twenty-seventh power", {"power": "^"}, "1438154507889852726183444152631219786894381583153845258187440649261861406444007705061667818579260288168960911038971146861270318150515332979942779445115792995022143147398923882210417756809968752955624663616680046150705205458739703051791304884326617897306804085476690385919577967507837730438682850636993793097728"),
+    ("square root of 5", {"power": "^"}, "5^(1/2)"),
+    ("square root of 5", {"power": "^", "do_fraction_evals": True, "res": 3}, "2.236"),
+    ("square root of 5", {"power": "^", "do_fraction_evals": True, "res": 10}, "2.2360679775"),
+    ("5th root of 32", {}, "32**(1/5)"),
+
+    ("one and a half", {}, "1.5"),
+    ("one and a third", {}, "4/3"),
+    ("one and a third", {"res": 3}, "1.333"),
+    ("one and two thirds", {"res": 3}, "1.667"),
+    ("one and two thirds", {"res": 4}, "1.6667"),
+    ("one point five", {"res": 4}, "1.5"),
+    ("one and a half", {"res": 4}, "1.5"),
+
+    ("a day and a half", {}, "1.5 days"),# right now is 'a day and 1/2'
+    ("a day and a half", {}, "1.5 days"),# right now is 'a day and a half'
+    ("a day and a half an hour", {"do_simple_evals": False}, "a day and 1/2 an hour"),
+    ("five days and a half", {}, "5.5 days"),
+]

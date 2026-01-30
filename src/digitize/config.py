@@ -52,11 +52,13 @@ class DigitizeParams:
     do_fraction_evals: bool = _sentinel
 
 
-    breaks: Iterable[str] = _sentinel
+    breaks: str | re.Pattern | Iterable[str | re.Pattern] = _sentinel
     units: Unit | UnitGroup | Iterable[Unit] = _sentinel
     unit_mode: UnitMode = _sentinel
     unit_max_cascade: int | None = _sentinel
     int_cascade_mode: bool = _sentinel
+
+    log_stages: bool = _sentinel
 
     def non_sentinels(self) -> dict:
         return {k: v for k, v in self.__dict__.items() if v is not _sentinel}
@@ -148,7 +150,7 @@ default = DigitizeParams(
     ),
     unit_mode=unit_modes.BASE,
     unit_max_cascade="base",
-    int_cascade_mode=True
+    int_cascade_mode=True,
 )
 
 

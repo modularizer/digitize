@@ -1,0 +1,32 @@
+from digitize import units
+from digitize.units import Unit, unit_modes
+
+MORE = [
+    ("a dozen eggs", {}, "12 eggs"),
+    ("five dozen donuts", {"do_simple_evals": False}, "5*12 donuts"),
+    ("five dozen donuts", {}, "60 donuts"),
+    ("8 sets of 3 cds", {"do_simple_evals": False}, "8*3 cds"),
+    ("8 sets of 3 cds", {}, "24 cds"),
+    ("8 hours", {"config": "units"}, "28800 s"),
+    ("8hours", {"config": "units"}, "28800s"),
+    ("8hr", {"config": "units"}, "28800s"),
+    ("8hr and 5min", {"config": "units"}, "29100s"),
+    ("8hr5min", {"config": "units"}, "29100s"),
+    ("half of an hour after sunrise", {"units": Unit("hour",value=60, new_unit="minute")}, "30 minutes after sunrise"),
+    ("an hour and a half after sunset", {}, "an hour and 0.5 after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour", base=True)}, "1.5 hours after sunset"),
+    ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset"),
+    ("five and two thirds hours after noon", {}, "17/3 hours after noon" ),
+    ("five and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "340 minutes after noon" ),
+    ("five minutes and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "45 minutes after noon" ),
+    ("an hour and 22 minutes after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "82 minutes after noon" ),
+    ("an hour and 22 minutes and 43 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
+    ("an hour and 23 minutes minus 17 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
+    ("5 seconds less than a minute", {"units": units.seconds}, "55 s" ),
+    ("an hour and a half less than two hours",{"units": Unit("hour", base=True)}, "0.5 hours" ),
+    ("5.5 minutes less than two hours",{"units": Unit("hour", value=60, new_unit="minute")}, "114.5 minutes" ),
+    ("5 minutes and 35 seconds less than two hours",{"units": units.seconds}, "6865 s" ),
+    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE}, "1h54m25s" ),
+    ("5 minutes and 35.5 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": None,}, "1h54m24s500ms" ),
+    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": 2, }, "1h54m" ),
+]

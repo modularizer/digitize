@@ -1,275 +1,138 @@
 #!/usr/bin/env python3
-import argparse
-import ast
 import re
 import sys
-from collections.abc import Iterable
 from fractions import Fraction
-from math import isqrt
-from typing import Tuple, Literal
-from decimal import Decimal, localcontext, ROUND_HALF_UP, getcontext
+from typing import Tuple
 
 from digitize.config import DigitizeMode, DigitizeParams, default
 from digitize import config as modes
-from digitize.consts import PI_DECIMAL
+from digitize.patterns import chunk_string, merge_chunks, any_word
 from digitize.sentinel import _sentinel
-from digitize import units
-from digitize.units import Unit, UnitGroup, unit_modes, AllUnits
+from digitize.tasks.fractions import frac_to_exact_str
+from digitize.tasks.replace_multipliers import replace_multipliers
+from digitize.tasks.simple_eval import simple_eval
+from digitize.tasks.unit_cascade import get_level_merger
+from digitize.units import Unit, UnitGroup, unit_modes, AllUnits, flatten_units
+from digitize.tasks.roman import ROMAN_PATTERN, roman_to_int
+from digitize.tasks.ordinal import ORD_N019, ORD_ORDERS, ORD_TENS, ordinal_suffix
+from digitize.consts import N019, FRACTION_DEN_WORD, TENS_WORDS, DIGIT_WORD_TO_DIGIT, REPEAT_WORDS, MAGNITUDE_VALUE, \
+    POWERS
 
+_SEC__sentinel = "__DIGITIZE_ECOND_UNIT__"
+_REPEAT_PREFIX = "__repeat__"
 
 def digitize(
     s: str,
     *,
     config: DigitizeMode  | DigitizeParams = default,
     _iter: bool = True,
+    log_stages: bool = True,
+    log_context: bool = True,
+    call_level: str = "",
+    stages: list[str] = None,
     **kwargs # Accepts DigitizeParams args
 ) -> str:
+    stages = [] if stages is None else stages
+
+    def record_stage(old, new: str | tuple[str], stage: str = "", context = None) -> str:
+        if old == new:
+            return old
+        ctx = (stage + ((f"({context!r})" if context else "") if log_context else ""))
+        if ctx:
+            ctx += ": "
+        n = f"'{new}'" if isinstance(new, str) else new
+        d = f"{call_level}{ctx}'{old}' -> {n}"
+        if log_stages:
+            print(d)
+        stages.append((new, ctx))
+        return new
+
+    s = record_stage("", s, "input")
+
     if not s.strip():
         return s
+
+
+    # first, merge params with the default config profile selected
+    # basically there are two toggles.
+    # config selects a full set of params, and then **kwargs perform overrides
     params = DigitizeParams(**kwargs)
     defaults = config if isinstance(config, DigitizeParams) else getattr(modes, config)
     config = DigitizeParams(**{**defaults.non_sentinels(), **params.non_sentinels()}).finalize()
 
-    # __________________________________________________________________________________________________________________
-
-    if not config.breaks:
-        chunks = [s]
-        seps = []
-    else:
-        # split and keep delimiters
-        pattern = f"({'|'.join(map(re.escape, config.breaks))})"
-        parts = re.split(pattern, s)
-
-        chunks = parts[::2]   # text
-        seps   = parts[1::2]  # separators
-
+    # breaks allows setting up break words to indepenently analyze different sections then stitch back together
+    # e.g. use ". " to separately analyze each sentence
+    chunks, seps = chunk_string(s, config.breaks)
     if len(chunks) > 1:
-        processed = [digitize(c, config=config) for c in chunks]
-
-        out = []
-        for i, c in enumerate(processed):
-            out.append(c)
-            if i < len(seps):
-                out.append(seps[i])
-
-        return "".join(out)
-
-    # _________________________________________
+        chunks = record_stage(s, chunks, "split by breaks", f"breaks={config.breaks}, seps={seps}")
+        return merge_chunks([digitize(c, config=config, log_stages=log_stages, log_context=log_context, call_level=f"\t[chunk#{i}]")
+                             for i, c in enumerate(chunks)], seps=seps)
 
 
-    _SEC__sentinel = "__DIGITIZE_ECOND_UNIT__"
-    _REPEAT_PREFIX = "__repeat__"
-    _repeat_map: dict[str, str] = {}
 
+
+    # tokenize repeat words like times, etc.
+    _repeat_map: dict[str, str] = {}  # store mapping for reversing near the end
     if config.support_reps and config.rep_signifiers:
+
         # Make a single alternation regex. Each signifier is treated as a full match.
         # Use a capturing group so we can store the exact matched text.
-        if isinstance(config.rep_signifiers, str):
-            rep_rx = re.compile(
-                rf"(?i)\b({config.rep_signifiers})\b"
-            )
-        elif isinstance(config.rep_signifiers, re.Pattern):
-            rep_rx = config.rep_signifiers
-        elif isinstance(config.rep_signifiers, Iterable):
-            pats = [p.pattern if isinstance(p, re.Pattern) else p for p in config.rep_signifiers]
-            rep_rx = re.compile(
-                r"(?i)\b(" + "|".join(pats) + r")\b"
-            )
-        else:
-            raise TypeError(f"rep_signifiers must be a string, pattern, or iterable of strings or patterns, not {type(config.rep_signifiers)}")
+        rep_rx = re.compile(any_word(config.rep_signifiers), flags=re.IGNORECASE)
 
         def _rep_repl(m: re.Match) -> str:
             key = f"{_REPEAT_PREFIX}{len(_repeat_map)}_"
             _repeat_map[key] = m.group(0)  # store original, with original casing/spaces
             return key
 
-        s = rep_rx.sub(_rep_repl, s)
-
-
-
-    if config.attempt_to_differentiate_seconds:
-        # (a|one|per|each) second
-        # Keep the left word intact and replace only "second" with a _sentinel.
-        s = re.sub(
-            r"\b(a|one|per|each)\s+(second)\b",
-            lambda m: f"{m.group(1)} {_SEC__sentinel}",
-            s,
-            flags=re.IGNORECASE,
-        )
-
-        # the second (after|before|between|when)
-        s = re.sub(
-            r"\b(the)\s+(second)\s+(after|before|between|when)\b",
-            lambda m: f"{m.group(1)} {_SEC__sentinel} {m.group(3)}",
-            s,
-            flags=re.IGNORECASE,
-        )
-
-    # --- expand capital suffixes BEFORE lowercasing (capital-only by regex) ---
-    if config.replace_multipliers:
-        suffix_multipliers = {"k": 10**3, "K": 10**3, "M": 10**6, "G": 10**9, "T": 10**12, "P": 10**15}
-
-        def _expand_suffix(m):
-            n = float(m.group(1))
-            suf = m.group(2)
-            value = int(n * suffix_multipliers[suf])
-            n_fmt = f"{value:,}" if config.use_commas else str(value)
-            m_fmt = suf
-            return config.fmt_multipliers.replace("%n", n_fmt).replace("%m", m_fmt).replace("%i", f"{m.group(1)}{m.group(2)}")
-
-        s = re.sub(
-            r"(?<![A-Za-z0-9])(\d+(?:\.\d+)?)([kKMGTP])(?=[^A-Za-z0-9]|$)",
-            _expand_suffix,
-            s,
-        )
-
-
-
-
-    n019 = [
-        "zero","one","two","three","four","five","six","seven",
-        "eight","nine","ten","eleven","twelve","thirteen","fourteen",
-        "fifteen","sixteen","seventeen","eighteen","nineteen"
-    ]
-    digit_word_to_digit = {
-        "o": "0", "oh": "0",
-        "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
-        "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
-    }
-
-    tens_words = ["twenty","thirty","forty","fifty","sixty","seventy","eighty","ninety"]
-
-    word_to_num = {w: i for i, w in enumerate(n019)}
-    word_to_num.update({w: (i + 2) * 10 for i, w in enumerate(tens_words)})
-
-    magnitude_value = {
-        "thousand": 10**3,
-        "million": 10**6,
-        "billion": 10**9,
-        "trillion": 10**12,
-        "quadrillion": 10**15,
-    }
-
-    # --- Ordinals ---
-    ordinal_word_to_num = {}
-    ordinal_magnitude_exact = {}
-    # --- Fractions (building "num/den", NOT evaluating) ---
-    fraction_den_word = {
-        "half": 2, "halves": 2,
-        "third": 3, "thirds": 3,
-
-        # "hundredth(s)" etc
-        "hundredth": 100, "hundredths": 100,
-        "thousandth": 10**3, "thousandths": 10**3,
-        "millionth": 10**6, "millionths": 10**6,
-        "billionth": 10**9, "billionths": 10**9,
-        "trillionth": 10**12, "trillionths": 10**12,
-        "quadrillionth": 10**15, "quadrillionths": 10**15,
-    }
-
-    if config.support_ordinals:
-        ordinal_word_to_num.update({
-            "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
-            "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
-            "eleventh": 11, "twelfth": 12, "thirteenth": 13, "fourteenth": 14,
-            "fifteenth": 15, "sixteenth": 16, "seventeenth": 17, "eighteenth": 18,
-            "nineteenth": 19,
-            # common typo
-            "fifthe": 5,
-        })
-        ordinal_word_to_num.update({
-            "twentieth": 20, "thirtieth": 30, "fortieth": 40, "fiftieth": 50,
-            "sixtieth": 60, "seventieth": 70, "eightieth": 80, "ninetieth": 90,
-        })
-        ordinal_magnitude_exact = {
-            "hundredth": 100,
-            "thousandth": 10**3,
-            "millionth": 10**6,
-            "billionth": 10**9,
-            "trillionth": 10**12,
-            "quadrillionth": 10**15,
-        }
-
-    # --- rep words ---
-    repeat_word_to_num = {"once": 1, "twice": 2, "thrice": 3}
-    
-    # --- Roman Numerals ---
-    _ROMAN_PATTERN = re.compile(r"^(?=[MDCLXVI])M*(C[MD]|D?C{0,3})(X[CL]|L?X{0,3})(I[XV]|V?I{0,3})$", re.IGNORECASE)
-    
-    def roman_to_int(s: str) -> int:
-        roman = {'I': 1, 'V': 5, 'X': 10, 'L': 50, 'C': 100, 'D': 500, 'M': 1000}
-        s = s.upper()
-        num = 0
-        for i in range(len(s) - 1):
-            if roman[s[i]] < roman[s[i + 1]]:
-                num -= roman[s[i]]
-            else:
-                num += roman[s[i]]
-        num += roman[s[-1]]
-        return num
-
-    def ordinal_suffix(n: int) -> str:
-        n_abs = abs(n)
-        last_two = n_abs % 100
-        if 11 <= last_two <= 13:
-            return "th"
-        last = n_abs % 10
-        if last == 1:
-            return "st"
-        if last == 2:
-            return "nd"
-        if last == 3:
-            return "rd"
-        return "th"
-
-
-    def is_numeric_atom(tok: str) -> bool:
-        t = tok.lower()
-
-        # decimals
-        if t == "point":
-            return True
-
-        # allow digit-spelling zero tokens to stay inside phrases
-        if t in {"oh", "o"}:
-            return True
-
-        # keep fraction denominators inside the numeric phrase
-        if t in fraction_den_word:
-            return True
-
-
-        if config.support_reps and t in repeat_word_to_num:
-            return True
-
-        if config.support_ordinals and re.fullmatch(r"\d+(st|nd|rd|th)", t):
-            return True
-
-        if t.isdigit() or t in word_to_num or t == "hundred" or t in magnitude_value:
-            return True
-
-        if config.support_ordinals and (t in ordinal_word_to_num or t in ordinal_magnitude_exact):
-            return True
-
-        if config.support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", tok, flags=re.IGNORECASE):
-            return True
-
-        if config.support_roman and _ROMAN_PATTERN.fullmatch(tok):
-            return True
-
-        return False
-
-
-    def allows_and_after(prev_norm: str | None) -> bool:
-        if prev_norm is None:
-            return False
-        prev_norm = prev_norm.lower()
-        return prev_norm == "hundred" or prev_norm in magnitude_value
+        s2 = rep_rx.sub(_rep_repl, s)
+        s = record_stage(s, s2, "repeat_sentinel_preprocessed", rep_rx)
 
     def _is_repeat_tail(w: str) -> bool:
         return re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", w, flags=re.IGNORECASE) is not None
 
+    # attempt to differentiate "second" in the time meaning vs "second" in the numerical meaning
+    if config.attempt_to_differentiate_seconds:
+        s2 = re.sub(r"\b(a|one|per|each)\s+second\b",rf"\1 {_SEC__sentinel}", s, flags=re.IGNORECASE)
+        s3 = re.sub(r"\b(the)\s+second\s+(after|before|between|when)\b",rf"\1 {_SEC__sentinel} \2", s2,flags=re.IGNORECASE,)
+        s = record_stage(s, s3, "attempt_to_differentiate_seconds")
 
+    # --- expand capital suffixes BEFORE lowercasing (capital-only by regex) ---
+    if config.replace_multipliers:
+        s2 = replace_multipliers(s, fmt_multipliers=config.fmt_multipliers, use_commas=config.use_commas)
+        s = record_stage(s, s2, "replace_multipliers")
+
+
+    word_to_num = {w: i for i, w in enumerate(N019)}
+    word_to_num.update({w: (i + 2) * 10 for i, w in enumerate(TENS_WORDS)})
+    ordinal_word_to_num = {}
+    ordinal_magnitude_exact = {}
+    if config.support_ordinals:
+        ordinal_word_to_num.update(ORD_N019)
+        ordinal_word_to_num.update(ORD_TENS)
+        ordinal_magnitude_exact = ORD_ORDERS.copy()
+    repeat_word_to_num = REPEAT_WORDS.copy()
+
+
+    def is_numeric_atom(tok: str) -> bool:
+        _t = tok.lower()
+        return (
+            _t in {"point", "oh", "o"} or # decimals
+            _t in FRACTION_DEN_WORD  or # keep fraction denominators inside the numeric phrase
+            (config.support_reps and _t in repeat_word_to_num) or
+            (config.support_ordinals and re.fullmatch(r"\d+(st|nd|rd|th)", _t)) or
+            (_t.isdigit() or _t in word_to_num or _t == "hundred" or _t in MAGNITUDE_VALUE) or
+            (config.support_ordinals and (_t in ordinal_word_to_num or _t in ordinal_magnitude_exact)) or
+            (config.support_reps and re.fullmatch(rf"{_REPEAT_PREFIX}\d+_", tok, flags=re.IGNORECASE)) or
+            (config.support_roman and ROMAN_PATTERN.fullmatch(tok))
+        )
+
+
+    def allows_and_after(prev_norm: str | None) -> bool:
+        # allow grammatically incorrect 'hundred and'
+        if prev_norm is None:
+            return False
+        prev_norm = prev_norm.lower()
+        return prev_norm == "hundred" or prev_norm in MAGNITUDE_VALUE
 
     # returns (value, is_ordinal, is_time_phrase)
     def parse_number(norm_words: list[str]) -> Tuple[object, bool, bool] | None:
@@ -295,8 +158,6 @@ def digitize(
         if not core:
             return None
 
-
-
         # -------------------------
         # FRACTIONS: "<numerator> <denominator>"
         #   "one third" -> 1/3
@@ -315,8 +176,8 @@ def digitize(
 
         if not is_time_phrase:
             # word denominators
-            if denom_tok in fraction_den_word:
-                denom_val = fraction_den_word[denom_tok]
+            if denom_tok in FRACTION_DEN_WORD:
+                denom_val = FRACTION_DEN_WORD[denom_tok]
                 denom_is_plural = denom_tok.endswith("s") or denom_tok.endswith("ves")
 
             # numeric ordinals like "100th" / "100ths"
@@ -360,8 +221,8 @@ def digitize(
                                         return None
                                     if w.isdigit():
                                         digs.append(w)
-                                    elif w in digit_word_to_digit:
-                                        digs.append(digit_word_to_digit[w])
+                                    elif w in DIGIT_WORD_TO_DIGIT:
+                                        digs.append(DIGIT_WORD_TO_DIGIT[w])
                                     else:
                                         return None
                                 frac = "".join(digs)
@@ -389,9 +250,9 @@ def digitize(
                                         if w == "hundred":
                                             if not saw2: return None
                                             current2 *= 100; continue
-                                        if w in magnitude_value:
+                                        if w in MAGNITUDE_VALUE:
                                             if not saw2: return None
-                                            total2 += current2 * magnitude_value[w]
+                                            total2 += current2 * MAGNITUDE_VALUE[w]
                                             current2 = 0
                                             continue
                                         return None
@@ -420,9 +281,9 @@ def digitize(
                                 if w == "hundred":
                                     if not saw2: return None
                                     current2 *= 100; continue
-                                if w in magnitude_value:
+                                if w in MAGNITUDE_VALUE:
                                     if not saw2: return None
-                                    total2 += current2 * magnitude_value[w]
+                                    total2 += current2 * MAGNITUDE_VALUE[w]
                                     current2 = 0
                                     continue
                                 return None
@@ -468,8 +329,8 @@ def digitize(
                 if w.isdigit():
                     digits.append(w)  # preserve "05" if it appears
                     continue
-                if w in digit_word_to_digit:
-                    digits.append(digit_word_to_digit[w])
+                if w in DIGIT_WORD_TO_DIGIT:
+                    digits.append(DIGIT_WORD_TO_DIGIT[w])
                     continue
                 return None
 
@@ -520,10 +381,10 @@ def digitize(
                         current *= 100
                         continue
 
-                    if w in magnitude_value:
+                    if w in MAGNITUDE_VALUE:
                         if not saw_any:
                             return None
-                        total += current * magnitude_value[w]
+                        total += current * MAGNITUDE_VALUE[w]
                         current = 0
                         continue
 
@@ -585,14 +446,14 @@ def digitize(
                 is_ord = True
                 continue
 
-            if w in magnitude_value:
+            if w in MAGNITUDE_VALUE:
                 if not saw_any:
                     return None
-                total += current * magnitude_value[w]
+                total += current * MAGNITUDE_VALUE[w]
                 current = 0
                 continue
                 
-            if config.support_roman and _ROMAN_PATTERN.fullmatch(w):
+            if config.support_roman and ROMAN_PATTERN.fullmatch(w):
                 current += roman_to_int(w)
                 saw_any = True
                 continue
@@ -625,13 +486,13 @@ def digitize(
             if w == "and":
                 continue
 
-            if w in fraction_den_word:
+            if w in FRACTION_DEN_WORD:
                 has_convertible = True
                 break
 
             if w.isdigit():
                 continue
-            if w in word_to_num or w == "hundred" or w in magnitude_value:
+            if w in word_to_num or w == "hundred" or w in MAGNITUDE_VALUE:
                 has_convertible = True
                 break
             if config.support_ordinals and (w in ordinal_word_to_num or w in ordinal_magnitude_exact or re.fullmatch(r"\d+(st|nd|rd|th)", w)):
@@ -643,7 +504,7 @@ def digitize(
             if config.support_reps and w in repeat_word_to_num:
                 has_convertible = True
                 break
-            if config.support_roman and _ROMAN_PATTERN.fullmatch(w):
+            if config.support_roman and ROMAN_PATTERN.fullmatch(w):
                 has_convertible = True
                 break
 
@@ -777,7 +638,7 @@ def digitize(
         if k >= len(tokens):
             return False
         t = tokens[k].lower()
-        return t.isdigit() or t in digit_word_to_digit
+        return t.isdigit() or t in DIGIT_WORD_TO_DIGIT
 
 
     def _commit_pending_ws_into_phrase():
@@ -792,7 +653,7 @@ def digitize(
         p = prev_norm.lower()
         nxt = next_tok.lower()
 
-        if p in tens_words:
+        if p in TENS_WORDS:
             if nxt.isdigit() or nxt in word_to_num:
                 return True
             if config.support_ordinals and nxt in ordinal_word_to_num:
@@ -813,7 +674,7 @@ def digitize(
             # allow "a" as numerator ONLY when it starts a fraction phrase: "a third", "a half", etc.
             if tl == "a":
                 nxt = _next_nonspace(i)
-                if nxt is not None and nxt.lower() in fraction_den_word:
+                if nxt is not None and nxt.lower() in FRACTION_DEN_WORD:
                     if norm:
                         _commit_pending_ws_into_phrase()
                     raw.append(t)        # keep "a"
@@ -900,70 +761,74 @@ def digitize(
     if pending_ws:
         out.append(pending_ws)
 
-    s = "".join(out).replace("%p", "")
+    s2 = "".join(out).replace("%p", "").replace("%p", "")
+    s = record_stage(s, s2,"main loop")
 
     if config.attempt_to_differentiate_seconds:
-        s = re.sub(_SEC__sentinel, "second", s)
+        s2 = re.sub(_SEC__sentinel, "second", s)
+        s = record_stage(s, s2,"re-sub seconds")
 
-    all_units = AllUnits(config.units)
+    all_units = AllUnits(flatten_units(config.units))
+    # print(f"{all_units=}")
+    # print(f"ug: {[ug for ug in all_units if not isinstance(ug, Unit)]}")
 
     for u in all_units:
         s2 = u.sub(s, all_units)
-        if s2 != s:
-            s = s2
+        s = record_stage(s, s2,"unit sub", u.key)
     s2 = re.sub(r" a set\(s\) of ", " ", s)
-    if s2 != s:
-        s = s2
+    s = record_stage(s, s2,"a set(s) of")
 
     if _repeat_map:
-        s = re.sub(
+        s2 = re.sub(
             rf"{_REPEAT_PREFIX}\d+_",
             lambda m: _repeat_map.get(m.group(0), m.group(0)),
             s,
         )
-
-    s = s.replace("%p", "")
+        s = record_stage(s, s2,"re-sub repeat map")
 
     if config.parse_signs:
         num_rx = r"(\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
-        s = re.sub(rf"\b(neg|negative|minus)\s+{num_rx}\b", r"-\2", s, flags=re.IGNORECASE)
-        s = re.sub(rf"\b(pos|positive|plus)\s+{num_rx}\b", r"+\2", s, flags=re.IGNORECASE)
-        s = re.sub(rf"\+\s+{num_rx}\b", r"+\1", s, flags=re.IGNORECASE)
-        s = re.sub(rf"-\s+{num_rx}\b", r"-\1", s, flags=re.IGNORECASE)
+        s2 = re.sub(rf"\b(neg|negative|minus)\s+{num_rx}\b", r"-\2", s, flags=re.IGNORECASE)
+        s = record_stage(s, s2,"negative")
+        s2 = re.sub(rf"\b(pos|positive|plus)\s+{num_rx}\b", r"+\2", s, flags=re.IGNORECASE)
+        s = record_stage(s, s2,"positive")
+        s2 = re.sub(rf"\+\s+{num_rx}\b", r"+\1", s, flags=re.IGNORECASE)
+        s3 = re.sub(rf"-\s+{num_rx}\b", r"-\1", s2, flags=re.IGNORECASE)
+        s = record_stage(s, s3,"+- space")
 
     # x over y  /  x divided by y  ->  x/y
-    s = re.sub(
+    s2 = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+(?:over|divided\s+by)\s+(\d+(?:\.\d+)?)\b",
         rf"\1{config.div}\2",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"divided by")
     # x over y  /  x divided by y  ->  x/y
-    s = re.sub(
+    s2 = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+(?:over|divided\s+by|out of|into|of)\s+(\d+(?:\.\d+)?)\b",
         rf"\1{config.div}\2",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"divided by")
 
     # multiplication: "<num> times <num>" or "<num> multiplied by <num>" -> "<num>*<num>"
     num_atom = r"(?:[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?)"
 
-
-
-    s = re.sub(
+    s2 = re.sub(
         rf"({num_atom})\s\+({num_atom})",
         r"\1+\2",
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(
+    s3 = re.sub(
         rf"({num_atom})\s-({num_atom})",
         r"\1-\2",
-        s,
+        s2,
         flags=re.IGNORECASE,
     )
-
+    s = record_stage(s, s3,"+- space")
 
     def _frac_exponent_to_ordinal(m: re.Match) -> str:
         base = m.group(1)
@@ -986,90 +851,102 @@ def digitize(
 
         exp = int(numer) * denom
         return f"{base} to the {exp} power"
-    s = re.sub(
+
+
+    s2 = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?(?:/\d+)?)\s+to\s+the\s+(\d+)/(\d+)\s+power\b",
         _frac_exponent_to_ordinal,
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(
+    s = record_stage(s, s2,"power-a")
+    s2 = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)?(?: (?:power|exponent|degree))?\b",
         rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(
+    s = record_stage(s, s2,"power-b")
+    s2 = re.sub(
         rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)\s({num_atom})(?:rd|st|th)\b",
         rf"\1{config.power}\2",
         s,
         flags=re.IGNORECASE,
     )
-    powers = {"squared": 2, "cubed": 3}
-    for k, v in powers.items():
-        s = re.sub(
+    s = record_stage(s, s2,"power-c")
+
+    for k, v in POWERS.items():
+        s2 = re.sub(
             rf"\b({num_atom})\s(?:raised )?(?:to the power of|to the)?\s({k})(?: power)?\b",
             rf"\1{config.power}{v}",
             s,
             flags=re.IGNORECASE,
         )
+        s = record_stage(s, s2, "power-d", k)
 
     # helpers
     ws = r"\s+"
     num_atom = r"[+-]?\d+(?:\.\d+)?(?:/\d+)?"
 
     # square root of x  ->  sqrt(x)
-    s = re.sub(
+    s2 = re.sub(
         rf"\b(square)\s+root(?:\s+of)?{ws}({num_atom})\b",
         rf"\2{config.power}(1/2)",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"square root")
 
     # cube root of x  ->  cbrt(x)
-    s = re.sub(
+    s2 = re.sub(
         rf"\b(cube)\s+root(?:\s+of)?{ws}({num_atom})\b",
         rf"\2{config.power}(1/3)",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"cubed root")
 
     # nth root of x  ->  root(n,x)
     # "the 5th root of 32", "5th root of 32", "5 root of 32" (if you want)
-    s = re.sub(
+    s2 = re.sub(
         rf"\b(?:the\s+)?({num_atom})(?:st|nd|rd|th)?\s+root(?:\s+of)?{ws}({num_atom})\b",
         rf"\2{config.power}(1/\1)",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"nth root")
 
 
     # --- Scientific notation normalization (place right before return) ---
     num_atom_sci = r"[+-]?\d+(?:\.\d+)?(?:/\d+)?(?:e[+-]?\d+)?"
 
     # 1) "6 e -5" -> "6e-5"
-    s = re.sub(
+    s2 = re.sub(
         rf"\b({num_atom_sci})\s*e\s*([+-]?\d+)\b",
         r"\1e\2",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"sci-a")
 
     # 2) "6e-5" -> "6{mult}10{power}-5"
-    s = re.sub(
+    s2 = re.sub(
         rf"\b([+-]?\d+(?:\.\d+)?)(?:e([+-]?\d+))\b",
         lambda m: f"{m.group(1)}{config.mult}10{config.power}{m.group(2)}",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"sci-b")
 
     # 3) "6*10^5", "6×10**(5)", "6 x 10^5" -> "6{mult}10{power}5"
     ten_pow = rf"10(?:\s*)?(?:\^|\*\*)(?:\s*)?(\(?[+-]?\d+\)?)"
-    s = re.sub(
+    s2 = re.sub(
         rf"\b({num_atom_sci})\s*(?:\*|x|×)\s*{ten_pow}\b",
         lambda m: f"{m.group(1)}{config.mult}(10{config.power}{m.group(2)})",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"sci-c")
 
     # --- ACTUAL_MATH: mixed numbers like "1 and 1/2" ---
     # supports: "1 and 1/2", "1 and 2/3", etc.
@@ -1104,10 +981,10 @@ def digitize(
                 if d != 1:
                     return m.group(0)
 
-                return _fraction_to_exact_str(val)
+                return frac_to_exact_str(val)
 
             # ROUNDED MODE
-            return _fraction_to_exact_str(
+            return frac_to_exact_str(
                 val.limit_denominator()  # already exact; formatting handles rounding elsewhere
             )
 
@@ -1118,12 +995,13 @@ def digitize(
 
     # Only collapse when the RHS is a fraction token your pipeline produced.
     # This avoids touching phrases like "rock and roll".
-    s = re.sub(
+    s2 = re.sub(
         r"\b([+-]?\d+(?:\.\d+)?)\s+and\s+([+-]?\d+(?:\.\d+)?)/(\d+)\b",
         lambda f: _mixed_repl(f, config.res),
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"and-a")
 
     # --- unit mixed-number: (a|N) <unit> and a/b  ->  (N + a/b) <unit> ---
     # Assumes "half" etc is already replaced into "1/2" earlier.
@@ -1154,46 +1032,54 @@ def digitize(
             plural_unit = unit + "s"
         return f"{out} {plural_unit}"
 
-    s = re.sub(
+    s2 = re.sub(
         r"\b(a|\d+)\s+(\S+)\s+and\s+(\d+)/(\d+)$",
         _unit_and_frac,
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"and-b")
     # print("testing", s)
 
-    s = re.sub(
+    s2 = re.sub(
         r"(\d+(?:\/|\.)\d+) of (?:an?\s?set(?:\(s\))?s? of )?(\d+)",
         rf"(\1){config.mult}\2",
         s,
         flags=re.IGNORECASE,
     )
-    s = re.sub(
+    s = record_stage(s, s2,"of")
+    s2 = re.sub(
         r"(\d+) and (\d+(?:\.|\/)\d+)",
         rf"\1 + \2",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"and-c")
 
 
     if config.do_simple_evals:
         # print("se", s)
-        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s = record_stage(s, s2,"simple-evals")
         # print("postse", s)
 
-    s = re.sub(
+    s2 = re.sub(
         rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
         rf"\1{config.mult}\2",
         s,
         flags=re.IGNORECASE,
     )
+    s = record_stage(s, s2,"times")
 
     if config.do_simple_evals:
         # print("se", s)
-        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s = record_stage(s, s2,"simple-evals-2")
 
     # replace hanging
-    s = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
+    s2 = re.sub(rf"\b(?:an? )?set(?:\(s\))?s? of (\d)", r"\1", s, flags=re.IGNORECASE)
+    s = record_stage(s, s2,"hanging-set")
+
     def merge_units(s, u, v=1):
         if isinstance(u, UnitGroup):
             s = u.base.base_merge(s) if v==1 else u.base.base_merge2(s)
@@ -1207,19 +1093,17 @@ def digitize(
     # print("more bases", new_units)
 
     s2 = merge_units(s, all_base_units)
-    if s2 != s:
-        # print(f"merged, '{s}' => '{s2}'")
-        s = s2
+    s = record_stage(s, s2,"merge-units")
     s2 = merge_units(s, all_base_units, v=2)
-    if s2 != s:
-        # print(f"merge2d, '{s}' => '{s2}'")
-        s = s2
+    s = record_stage(s, s2,"merge-units-2")
+
+
     if config.do_simple_evals:
-        # print("se", s)
-        s = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s2 = simple_eval(s, power=config.power, mult=config.mult, div=config.div, eval_fractions=config.do_fraction_evals,res=config.res)
+        s = record_stage(s, s2,"simple-evals-3")
 
-    s = merge_units(s, all_base_units)
-
+    s2 = merge_units(s, all_base_units)
+    s = record_stage(s, s2,"merge-units-b")
     if not _iter:
         return s
     first = s
@@ -1237,7 +1121,7 @@ def digitize(
         if len(s2) > len(s):
             return s
         prevs.append(s2)
-        s = s2
+        s = record_stage(s, s2,"iter", i)
         s2 = digitize(s, config=config, _iter=False)
         i += 1
     else:
@@ -1256,1048 +1140,23 @@ def digitize(
             levels = list(mapping.keys()) # [7*24*3600, 23*3600, 3600, 60, 1, 0.001, 0.000001]
             names = list(mapping.values()) # ['w', 'd', 'h', 'm', 's', 'ms', 'µs']
 
-            repl = repl_factory(levels, names, unit_max_cascade=config.unit_max_cascade)  # or 1/2/3...
+            repl = get_level_merger(levels, names, unit_max_cascade=config.unit_max_cascade)  # or 1/2/3...
 
-            s = re.sub(
+            s2 = re.sub(
                 rf"(\d+(?:(?:\.|\/)\d+)?)\s*{k}(?![A-Za-z])",
                 lambda m: repl(m, res=config.res, int_cascade_mode=config.int_cascade_mode),
                 s,
             )
+            s = record_stage(s, s2,"unit_merge", g)
 
 
     return s
 
-
-
-
-
-
-def _pi_for_res(res: int | None) -> str:
-    # Use guard digits so later rounding is stable.
-    # If res is None, default to ~50 digits.
-    guard = 25
-    if res is None:
-        return PI_DECIMAL
-    # +2 because "3." counts
-    digits = min(len(PI_DECIMAL), res + guard + 2)
-    return PI_DECIMAL[:digits]
-
-
-def _has_real_math(expr: str) -> bool:
-    """
-    True iff the expression contains at least TWO numbers and at least one binary operator.
-    This rejects: +10, -10, (10), -(10), + (10)
-    Accepts: 2+3, 2*-3, (2+3), -(2+3), 10/4, 2**3
-    """
-    try:
-        node = ast.parse(expr, mode="eval")
-    except SyntaxError:
-        return False
-
-    nums = 0
-    has_binop = False
-
-    for n in ast.walk(node):
-        if isinstance(n, ast.BinOp) and isinstance(n.op, (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)):
-            has_binop = True
-        if isinstance(n, ast.Constant) and isinstance(n.value, (int, float)):
-            nums += 1
-        # optional: Python <3.8
-        if hasattr(ast, "Constant") and isinstance(n, ast.Constant):  # type: ignore[attr-defined]
-            nums += 1
-
-    return has_binop and nums >= 2
-
-
-_ALLOWED_BINOPS = (ast.Add, ast.Sub, ast.Mult, ast.Div, ast.Pow)
-_ALLOWED_UNARYOPS = (ast.UAdd, ast.USub)
-
-_DEC_RX = re.compile(r"(?<![\w.])(\d+\.\d+)(?![\w.])")  # decimal literals only, no sign
-
-def _decimal_literal_to_fraction_str(lit: str) -> str:
-    # "5.8" -> "Fraction(58, 10)"
-    a, b = lit.split(".", 1)
-    num = int(a + b)
-    den = 10 ** len(b)
-    return f"Fraction({num},{den})"
-
-def _rewrite_decimal_literals(expr: str) -> str:
-    return _DEC_RX.sub(lambda m: _decimal_literal_to_fraction_str(m.group(1)), expr)
-
-def _fraction_to_exact_str(x: Fraction) -> str:
-    """
-    If denominator has only 2s and 5s -> exact terminating decimal string.
-    Else -> "n/d" (reduced).
-    """
-    n, d = x.numerator, x.denominator
-    dd = d
-    while dd % 2 == 0: dd //= 2
-    while dd % 5 == 0: dd //= 5
-    if dd != 1:
-        return f"{n}/{d}"
-
-    # terminating decimal
-    sign = "-" if n < 0 else ""
-    n = abs(n)
-
-    # scale to integer / 10^k
-    k = 0
-    dd = d
-    while dd % 2 == 0: dd //= 2; k += 1
-    while dd % 5 == 0: dd //= 5; k += 1
-
-    # compute exact decimal digits
-    scaled = n * (10**k) // d
-    s = str(scaled)
-    if k == 0:
-        return sign + s
-    if len(s) <= k:
-        s = "0" * (k - len(s) + 1) + s
-    out = s[:-k] + "." + s[-k:]
-    out = out.rstrip("0").rstrip(".")
-    return sign + out
-
-
-def _int_nth_root_exact(n: int, k: int) -> int | None:
-    """Return exact integer r such that r**k == n, else None. n>=0, k>=1."""
-    if n < 0:
-        return None
-    if k == 1:
-        return n
-    if n in (0, 1):
-        return n
-    if k == 2:
-        r = isqrt(n)
-        return r if r * r == n else None
-
-    # binary search
-    lo, hi = 0, 1
-    while hi**k < n:
-        hi *= 2
-    while lo + 1 < hi:
-        mid = (lo + hi) // 2
-        p = mid**k
-        if p == n:
-            return mid
-        if p < n:
-            lo = mid
-        else:
-            hi = mid
-    return None
-
-def _pow_fraction_exact(base: Fraction, exp: Fraction) -> Fraction | None:
-    """
-    Return exact Fraction for base**exp iff it stays rational.
-    Otherwise return None (meaning: leave expression untouched).
-    """
-    if exp == 0:
-        return Fraction(1, 1)
-
-    # integer exponent => always rational
-    if exp.denominator == 1:
-        return base ** exp.numerator
-
-    # rational exponent p/q in lowest terms
-    p, q = exp.numerator, exp.denominator
-    if base == 0:
-        return Fraction(0, 1) if p > 0 else None  # 0**neg or 0**fraction undefined-ish
-
-    # handle sign: negative base with non-integer exponent is not rational in general
-    if base < 0:
-        return None
-
-    # reduce base
-    a = base.numerator
-    b = base.denominator
-
-    ra = _int_nth_root_exact(a, q)
-    rb = _int_nth_root_exact(b, q)
-    if ra is None or rb is None:
-        return None  # would be irrational -> do not evaluate
-
-    rooted = Fraction(ra, rb)
-
-    # now raise rooted to integer p
-    if p >= 0:
-        return rooted ** p
-    else:
-        return Fraction(1, 1) / (rooted ** (-p))
-
-
-def parse_num_to_fraction(num: str) -> Fraction:
-    if "/" in num:
-        a, b = num.split("/", 1)
-        return Fraction(int(a), int(b))
-    if "." in num:
-        d = Decimal(num)
-        # exact conversion: Decimal -> Fraction
-        n, den = d.as_integer_ratio()
-        return Fraction(n, den)
-    return Fraction(int(num), 1)
-
-
-def frac_to_decimal_str(fr: Fraction, places: int) -> str:
-    # exact Decimal division, then quantize
-    getcontext().prec = max(50, places + 20)
-    d = (Decimal(fr.numerator) / Decimal(fr.denominator)).quantize(
-        Decimal("1." + "0" * places),
-        rounding=ROUND_HALF_UP,
-    )
-    # keep fixed digits (matches your examples like 5.29380)
-    return format(d, "f")
-
-def frac_to_exact_str(fr: Fraction) -> str:
-    if fr.denominator == 1:
-        return str(fr.numerator)
-    # allow decimals ONLY if exact terminating (no rounding error)
-    if _is_terminating_decimal(fr):
-        getcontext().prec = 80
-        d = Decimal(fr.numerator) / Decimal(fr.denominator)
-        return format(d.normalize(), "f")
-    return f"{fr.numerator}/{fr.denominator}"
-
-def level_to_frac(x) -> Fraction:
-    # NEVER do Fraction(float). Use Decimal(str(float)) so 0.001 -> exactly 1/1000.
-    if isinstance(x, Fraction):
-        return x
-    if isinstance(x, int):
-        return Fraction(x, 1)
-    if isinstance(x, Decimal):
-        n, d = x.as_integer_ratio()
-        return Fraction(n, d)
-    if isinstance(x, float):
-        # critical: str(x) gives the human decimal, not the full binary repr
-        d = Decimal(str(x))
-        n, den = d.as_integer_ratio()
-        return Fraction(n, den)
-    if isinstance(x, str):
-        # allow "0.001", "1e-6"
-        d = Decimal(x)
-        n, den = d.as_integer_ratio()
-        return Fraction(n, den)
-    raise TypeError(f"Unsupported level type: {type(x)}")
-
-def repl_factory(levels, names, *, unit_max_cascade: int | Literal["base"] = None):
-    # Freeze exact Fractions for ALL levels (no float leakage)
-    L = [level_to_frac(x) for x in levels]   # DESC
-    N = list(names)
-
-    def repl(m: re.Match, res: int | None = 1, *, int_cascade_mode: bool = False) -> str:
-        num_s = m.group(1)
-        n = parse_num_to_fraction(num_s)  # this must also avoid float internally
-
-        if n == 0:
-            return f"0{N[-1]}"
-
-        start = next((i for i, lvl in enumerate(L) if n >= lvl), len(L) - 1)
-
-        if unit_max_cascade is None:
-            max_units = len(L) - start
-        elif unit_max_cascade == "base":
-            # allow cascading down to (and including) 1 second, but not below
-            base = Fraction(1, 1)
-            max_units = sum(1 for x in L[start:] if base <= x <= L[start])
-            max_units = max(1, max_units)
-        else:
-            max_units = max(1, int(unit_max_cascade))
-
-        end = min(len(L), start + max_units)
-        single_level = (end - start) == 1
-
-        out: list[str] = []
-        remaining = n
-
-        for i in range(start, end):
-            lvl = L[i]
-            unit = N[i]
-
-            if int_cascade_mode or not single_level:
-                q = remaining // lvl
-                if q:
-                    out.append(f"{q}{unit}")
-                    remaining -= q * lvl
-                continue
-
-            # single-level: allow fractional/decimal
-            v = remaining / lvl
-            v_str = frac_to_exact_str(v) if res is None else frac_to_decimal_str(v, res)
-            out.append(f"{v_str}{unit}")
-            break
-
-        return "".join(out) if out else f"0{N[-1]}"
-
-    return repl
-
-def _dec_pow_rational_exp(base: Fraction, exp: Fraction, res: int) -> Fraction:
-    """
-    Approximate base**exp (base>0, exp rational) to `res` decimal places,
-    returned as a Fraction that exactly equals that decimal.
-    """
-    if base <= 0:
-        raise ValueError("decimal approx only for positive base")
-
-    p, q = exp.numerator, exp.denominator
-    if q <= 0:
-        raise ValueError("bad exponent")
-
-    # work precision: res + guard digits
-    prec = max(50, res + 25)
-
-    with localcontext() as ctx:
-        ctx.prec = prec
-
-        B = Decimal(base.numerator) / Decimal(base.denominator)
-
-        # compute q-th root with Newton: y_{n+1} = ((q-1)*y + B / y^(q-1)) / q
-        def nth_root(x: Decimal, n: int) -> Decimal:
-            if n == 1:
-                return x
-            if n == 2:
-                return x.sqrt()
-            # initial guess
-            y = x if x < 1 else x / Decimal(n)
-            for _ in range(60):
-                y_prev = y
-                y = ((Decimal(n - 1) * y) + (x / (y ** (n - 1)))) / Decimal(n)
-                if y == y_prev:
-                    break
-            return y
-
-        # handle negative exponent via reciprocal at the end
-        neg = p < 0
-        p = abs(p)
-
-        root = nth_root(B, q)
-        val = (root ** p)
-        if neg:
-            val = Decimal(1) / val
-
-        # round to `res` decimals (half-up), then convert to exact Fraction
-        if res <= 0:
-            quant = Decimal("1")
-        else:
-            quant = Decimal("1").scaleb(-res)  # 10^-res
-
-        rounded = val.quantize(quant, rounding=ROUND_HALF_UP)
-
-        # Fraction(str(Decimal)) gives an exact rational equal to that decimal text
-        return Fraction(str(rounded))
-
-
-def _safe_eval_expr(expr: str, eval_fractions: bool = False, res: int = 3) -> Fraction:
-    """
-    Safely evaluate expression with only +,-,*,/,** and parentheses,
-    returning an EXACT Fraction. Non-integer exponents are rejected
-    (so we don't accidentally introduce irrationals / floats).
-    """
-
-    expr2 = _rewrite_decimal_literals(expr)
-    node = ast.parse(expr2, mode="eval")
-
-    def eval_node(n) -> Fraction:
-        if isinstance(n, ast.Expression):
-            return eval_node(n.body)
-
-        if isinstance(n, ast.Constant):
-            if isinstance(n.value, int):
-                return Fraction(n.value, 1)
-            if isinstance(n.value, float):
-                # should not happen after rewrite; keep safest fallback
-                return Fraction(str(n.value))
-            raise ValueError
-
-        if isinstance(n, ast.UnaryOp) and isinstance(n.op, _ALLOWED_UNARYOPS):
-            v = eval_node(n.operand)
-            return v if isinstance(n.op, ast.UAdd) else -v
-
-        if isinstance(n, ast.BinOp) and isinstance(n.op, _ALLOWED_BINOPS):
-            l = eval_node(n.left)
-            r = eval_node(n.right)
-
-            if isinstance(n.op, ast.Add):  return l + r
-            if isinstance(n.op, ast.Sub):  return l - r
-            if isinstance(n.op, ast.Mult): return l * r
-            if isinstance(n.op, ast.Div):  return l / r
-
-            if isinstance(n.op, ast.Pow):
-                if r.denominator == 1:
-                    return l ** r.numerator
-
-                # fractional exponent:
-                got = _pow_fraction_exact(l, r)
-                if got is not None:
-                    return got
-
-                if eval_fractions:
-                    # APPROXIMATE irrational power to `res` decimals
-                    return _dec_pow_rational_exp(l, r, res)
-
-                raise ValueError("non-integer exponent")
-
-        # allow only Fraction(...) calls we injected
-        if isinstance(n, ast.Call) and isinstance(n.func, ast.Name) and n.func.id == "Fraction":
-            if len(n.args) != 2:
-                raise ValueError
-            a = eval_node(n.args[0])
-            b = eval_node(n.args[1])
-            if a.denominator != 1 or b.denominator != 1:
-                raise ValueError
-            return Fraction(a.numerator, b.numerator)
-
-        raise ValueError(f"Disallowed expression: {expr!r}")
-
-    return eval_node(node)
-
-def _is_terminating_decimal(d: int) -> bool:
-    d = abs(d)
-    if d == 0:
-        return False
-    while d % 2 == 0:
-        d //= 2
-    while d % 5 == 0:
-        d //= 5
-    return d == 1
-
-def _pi_decimal_str(res: int | None) -> str:
-    # res=None => full PI_DECIMAL constant
-    if res is None:
-        return PI_DECIMAL
-    if res <= 0:
-        return "3"
-    with localcontext() as ctx:
-        ctx.prec = max(60, res + 25)
-        q = Decimal("1").scaleb(-res)  # 10^-res
-        d = Decimal(PI_DECIMAL).quantize(q, rounding=ROUND_HALF_UP)
-        s = format(d, "f").rstrip("0").rstrip(".")
-        return s
-
-
-def simple_eval(
-    s: str,
-    power="**",
-    mult="*",
-    div="/",
-    eval_fractions: bool = False,
-    res: int = 3,
-    *,
-    max_decimal_digits: int = 2000,   # safety: don't expand gigantic terminating decimals
-) -> str:
-    s = s.replace(power, "**").replace(mult, "*").replace(div, "/")
-
-    expr_rx = re.compile(r"""
-        [0-9\(\)\.pPiI]                # first non-space char
-        [0-9\(\)\.\s\+\-\*/pPiI]*      # middle (spaces allowed)
-        [0-9\)\.pPiI]                  # last non-space char
-    """, re.VERBOSE)
-    for m in reversed(list(expr_rx.finditer(s))):
-        expr = m.group(0)
-        if not _has_real_math(expr):
-            continue
-
-        core = expr.strip()
-        try:
-            val: Fraction = _safe_eval_expr(core, eval_fractions=eval_fractions, res=res)
-        except Exception:
-            continue
-
-        out = _fraction_to_exact_str(val)
-
-        if eval_fractions and "/" in out:
-            n, d = val.numerator, val.denominator
-            if d != 0:
-                abs_d = abs(d)
-                abs_n = abs(n)
-
-                if res is None:
-                    if _is_terminating_decimal(d):
-                        out = _fraction_to_exact_str(val)
-
-                elif res <= max_decimal_digits:
-                    neg = (n < 0) ^ (d < 0)
-                    n = abs_n
-                    d = abs_d
-
-                    q, r = divmod(n, d)
-                    if res == 0:
-                        if 2 * r >= d:
-                            q += 1
-                        out = f"-{q}" if neg and q != 0 else str(q)
-                    else:
-                        scale = 10 ** res
-                        scaled, rem = divmod(r * scale, d)
-                        if 2 * rem >= d:
-                            scaled += 1
-                            if scaled == scale:
-                                q += 1
-                                scaled = 0
-
-                        frac = str(scaled).rjust(res, "0")
-                        out = f"{q}.{frac}".rstrip("0").rstrip(".")
-                        if neg and out != "0":
-                            out = "-" + out
-
-        # Put whitespace back exactly as it was in the matched span
-        s = s[:m.start()] + out + s[m.end():]
-
-
-    s = s.replace("**", power).replace("*", mult).replace("/", div)
-    return s
-
-
-
-EXAMPLES: list[tuple[str, dict, str]] = [
-    ("i have one hundred and one dalmatians", {}, 'i have 101 dalmatians'),
-    ("one million and two hundred and thirty four", {"use_commas": True}, '1,000,234'),
-    ("Traffic hit 10K requests per second.", {}, 'Traffic hit 10000 requests per second.'),
-    ("one hundred and first place", {}, '101st place'),
-    ("we shipped on the 11th hour", {}, 'we shipped on the 11th hour'),
-    ("she pinged me twice", {}, 'she pinged me 2 times'),
-    ("he tried two times and failed", {"fmt_rep": "%nx", "rep_signifiers": r"times?"}, 'he tried 2x and failed'),
-    ("third time was the charm", {"fmt_nth_time": "%n-thx", "rep_signifiers": r"times?"}, '3-thx was the charm'),
-    ("the second attempt at which it worked", {"fmt_rep": "%nx", "rep_signifiers": COMPLEX_REP_PATTERN}, 'the 2nd time it worked'),
-    ("first place, two times, and 3M users", {"config": "token"}, '[NUM=1,ORD=st,OG=first] place, [NUM=2,REP=times,OG=two times], and [NUM=3000000,MULT=M,OG=3M] users'),
-]
-STORIES = [
-    ("one hundred and thirty-five", {}, "135"),
-    ("one thousand and one", {}, "1001"),
-    ("one thousand and one nights", {}, "1001 nights"),
-    ("i have one hundred and one dalmatians", {}, "i have 101 dalmatians"),
-    ("she counted one, and then two, and then three", {}, "she counted 1, and then 2, and then 3"),
-    ("one hundred and twenty three thousand and four", {}, "123004"),
-    ("one million and two hundred and thirty four", {}, "1000234"),
-    ("one hundred and", {}, "100 and"),
-    ("and one hundred", {}, "and 100"),
-    ("he whispered one hundred and thirty five times", {"fmt_rep": "%nx"}, "he whispered 135x"),
-
-    ("one hundred 33 dalmatians", {}, "133 dalmatians"),
-    ("one thousand 2 nights", {}, "1002 nights"),
-    ("one million two hundred and thirty four", {}, "1000234"),
-    ("one hundred and 33", {}, "133"),
-    ("one thousand and 2", {}, "1002"),
-
-    ("one hundred and thirty five, exactly", {}, "135, exactly"),
-    ("he said one hundred and one.", {}, "he said 101."),
-    ("i have (one hundred and one) dalmatians", {}, "i have (101) dalmatians"),
-    ("one hundred and one\nnights", {}, "101\nnights"),
-    ("one hundred and one  nights", {}, "101  nights"),
-
-    ("one hundred and thirty-five-six", {}, "129"),
-    ("one hundred and thirty-five and six and seven", {}, "135 and 6 and 7"),
-    ("one and two hundred", {}, "1 and 200"),
-    ("one hundred and one and two", {}, "101 and 2"),
-]
-
-
-FORMATTING_TALES = [
-    ("one hundred and thirty five", {"use_commas": True}, "135"),
-    ("one hundred and thirty five thousand", {"use_commas": True}, "135,000"),
-    ("one hundred and thirty five pigs", {"fmt": "[%n]"}, "[135] pigs"),
-    ("he saw one hundred and thirty five birds", {"fmt": ""}, "he saw  birds"),
-
-    ("one million and two hundred and thirty four", {"use_commas": True}, "1,000,234"),
-    ("balance: 0,000 and one", {}, "balance: 0,000 and 1"),
-    ("he saw one hundred and one birds", {"fmt": "<%n>"}, "he saw <101> birds"),
-    ("he saw one hundred and one birds", {"fmt": ""}, "he saw  birds"),
-]
-
-
-EDGE_CASE_CHRONICLES = [
-    ("someone said one hundred and nothing else", {}, "someone said 100 and nothing else"),
-    ("stone and one hundred and one", {}, "stone and 101"),
-    ("one and one is two", {}, "1 and 1 is 2"),
-    ("one hundred and thirty-five and six", {}, "135 and 6"),
-    ("one hundred and thirty five-six", {}, "129"),
-    (" ", {}, " "),
-    ("", {}, ""),
-    ("one... and then one hundred and one!!!", {}, "1... and then 101!!!")
-]
-
-
-# ---------------------------------------------------------------------------
-# Suffix sagas: capitalized K/M/G/T/P abbreviations should expand;
-# lowercase should not. (Now preserves original case outside numeric changes.)
-# ---------------------------------------------------------------------------
-
-SUFFIX_SAGAS = [
-    ("We raised 3M dollars.", {}, "We raised 3000000 dollars."),
-    ("Traffic hit 10K requests per second.", {}, "Traffic hit 10000 requests per second."),
-    ("Storage is 2G and climbing.", {}, "Storage is 2000000000 and climbing."),
-    ("Budget: 2.5M for phase one.", {}, "Budget: 2500000 for phase 1."),
-    ("Big money: 1T reasons to care.", {}, "Big money: 1000000000000 reasons to care."),
-    ("Rare air: 1P possibilities.", {}, "Rare air: 1000000000000000 possibilities."),
-
-    ("We raised 3m dollars.", {}, "We raised 3m dollars."),
-    ("Traffic hit 10k requests per second.", {}, "Traffic hit 10000 requests per second."),
-    ("He wrote 2g on the napkin.", {}, "He wrote 2g on the napkin."),
-
-    ("I have 10K and one dreams.", {}, "I have 10000 and 1 dreams."),
-    ("Deploy to 3M users and keep two backups.", {}, "Deploy to 3000000 users and keep 2 backups."),
-    ("Worth 10K, maybe 2.5M, never 3m.", {}, "Worth 10000, maybe 2500000, never 3m."),
-
-    ("Edge: 10K.", {"use_commas": True}, "Edge: 10,000."),
-
-    ("Edge: 10K, 2.5M, and 1G.", {}, "Edge: 10000, 2500000, and 1000000000."),
-    ("Edge: 10K.", {"use_commas": False}, "Edge: 10000."),
-    ("Edge: 10K.", {"use_commas": True}, "Edge: 10,000."),
-    ("not a suffix: 10Km and 2.5Ms", {}, "not a suffix: 10Km and 2.5Ms"),
-    ("we raised 3M dollars and spent 2K", {"use_commas": True}, "we raised 3,000,000 dollars and spent 2,000"),
-
-    ("I have $10K and one dreams.", {}, "I have $10000 and 1 dreams."),
-]
-
-
-# ---------------------------------------------------------------------------
-# Ordinal & repetition tales: first/second, once/twice, and nth-time phrases
-# ---------------------------------------------------------------------------
-
-ORDINAL_AND_TIME_TALES = [
-    # --- basic ordinals ---
-    ("first place", {}, "1st place"),
-    ("second attempt", {}, "2nd time"),
-    ("third try", {}, "3rd time"),
-    ("fourth wall", {}, "4th wall"),
-    ("twenty-first century", {}, "21st century"),
-    ("one hundred seventy-second", {}, "172nd"),
-    ("one hundred and first", {}, "101st"),
-    ("11th hour", {}, "11th hour"),
-
-    # --- ordinals with formatting ---
-    ("first prize", {"fmt_ordinal": "[%n%o]"}, "[1st] prize"),
-    ("second prize", {"fmt_ordinal": ""}, " prize"),
-
-    # --- once / twice / thrice ---
-    ("once", {}, "1 time"),
-    ("twice", {"fmt_rep": "%nx"}, "2x"),
-    ("thrice", {"fmt_rep": "%nx"}, "3x"),
-
-    # --- explicit times ---
-    ("one time", {}, "1 time"),
-    ("two times", {"fmt_rep": "%nx"}, "2x"),
-    ("1 time", {"fmt_rep": "%nx"}, "1x"),
-    ("3 times", {"fmt_rep": "%nx"}, "3x"),
-    ("he tried two times", {"fmt_rep": "%nx"}, "he tried 2x"),
-
-    # --- nth time ---
-    ("first time", {}, "1st time"),
-    ("second time", {}, "2nd time"),
-    ("twenty-first time", {"fmt_nth_time": "%n%ox"}, "21stx"),
-    ("one hundredth time", {"fmt_nth_time": "%n%ox"}, "100thx"),
-    ("five hundredth time", {"fmt_nth_time": "%n%o occurence"}, "500th occurence"),
-
-    # --- custom repetition formatting ---
-    ("twice", {"fmt_rep": "%n×"}, "2×"),
-    ("third time", {"fmt_nth_time": "<%n%o x>"}, "<3rd x>"),
-
-    # --- boundaries ---
-    ("first and second time", {}, "1st and 2nd time"),
-    ("once and twice", {"fmt_rep": "%nx"}, "1x and 2x"),
-    ("one time and two", {"fmt_rep": "%nx"}, "1x and 2"),
-]
-
-ROMAN_TALES = [
-    ("Chapter IV", {"support_roman": True}, "Chapter 4"),
-    ("Henry VIII", {"support_roman": True}, "Henry 8"),
-    ("Year MMXXIII", {"support_roman": True}, "Year 2023"),
-    ("Section IX", {"support_roman": True}, "Section 9"),
-    ("Part iii", {"support_roman": True}, "Part 3"),
-    ("Volume XL", {"support_roman": True}, "Volume 40"),
-    ("Not a roman numeral: MMXIXI", {"support_roman": True}, "Not a roman numeral: MMXIXI"),
-    ("Mixed: Chapter IV and Section X", {"support_roman": True}, "Mixed: Chapter 4 and Section 10"),
-    ("Without support: Chapter IV", {"support_roman": False}, "Without support: Chapter IV"),
-]
-
-SIGNED_TALES = [
-    ("negative five", {}, "-5"),
-    ("positive ten", {}, "+10"),
-    ("neg 3", {}, "-3"),
-    ("pos 7", {}, "+7"),
-    ("- 100", {}, "-100"),
-    ("+ 50", {}, "+50"),
-    ("negative one hundred", {}, "-100"),
-    ("positive two thousand", {}, "+2000"),
-    ("it was negative five degrees", {}, "it was -5 degrees"),
-    ("score: + 10", {}, "score: +10"),
-    ("no sign 5", {}, "no sign 5"),
-    ("negative-five", {}, "negative-5"),
-    ("positive-six", {}, "positive-6"),
-    ("negative five and positive six", {}, "-5 and +6"),
-    ("neg 5 and pos 6", {}, "-5 and +6"),
-    ("value is - 5", {}, "value is -5"),
-    ("value is + 5", {}, "value is +5"),
-    ("negative one hundred and one", {}, "-101"),
-    ("positive one hundred and one", {}, "+101"),
-    ("negative 5 and 6", {}, "-5 and 6"), # "negative" only applies to 5
-    ("negative 5 and negative 6", {}, "-5 and -6"),
-    ("disabled: negative five", {"parse_signs": False}, "disabled: negative 5"),
-]
-DECIMAL_TALES = [
-    ("zero point five", {}, "0.5"),
-    ("point five", {}, "0.5"),
-    ("two point zero five", {}, "2.05"),
-    ("one hundred and one point two", {}, "101.2"),
-    ("negative zero point five", {}, "-0.5"),
-    ("we shipped zero point five days early", {}, "we shipped 0.5 days early"),
-    ("we shipped oh point five days early", {}, "we shipped 0.5 days early"),
-    ("we shipped oh point oh five seven days early", {}, "we shipped 0.057 days early"),
-    ("we shipped five thousand point two days early", {}, "we shipped 5000.2 days early"),
-]
-
-THS = [
-    ("the hundredth time", {}, "the 100th time"),
-    ("the fifth time", {}, "the 5th time"),
-    ("the fourth amendment", {}, "the 4th amendment"),
-    ("one hundredth", {"do_simple_evals": False}, "1/100"),
-    ("one hundredth", {}, "0.01"),
-    ("1 hundredth", {"do_simple_evals": False}, "1/100"),
-    ("1 hundredth", {}, "0.01"),
-    ("1 100th", {}, "0.01"),
-    ("two hundredths", {}, "0.02"),
-    ("five thousandths", {}, "0.005"),
-    ("five point 8 millionth", {}, "0.0000058"),
-    ("one third", {}, "1/3"),
-    ("a third", {}, "1/3"),
-    ("two thirds", {}, "2/3"),
-    ("negative 5 thirds", {}, "-5/3"),
-    ("two halves", {}, "1"),
-    ("half", {"do_simple_evals": False}, "1/2"),
-    ("half", {}, "0.5"),
-    ("one over", {}, "1 over"),
-    ("one over five", {"do_simple_evals": False}, "1/5"),
-    ("one over five", {}, "0.2"),
-    ("two divided by three", {}, "2/3")
-]
-
-MATH = [
-    ("five times", {}, "5 times"),
-    ("five times ten", {"do_simple_evals": False}, "5*10"),
-    ("five times ten", {}, "50"),
-    ("two point eight multiplied by twenty two point 7", {"do_simple_evals": False}, "2.8*22.7"),
-    ("two point eight multiplied by twenty two point 7", {}, "63.56"),
-    ("five occurences of 10", {}, "50"),
-    ("seven of nine", {}, "7/9"),
-    ("6 into 11", {}, "6/11"),
-    ("seven point five plus 8", {}, "15.5"),
-    ("two to the power of 3", {"do_simple_evals": False}, "2**3"),
-    ("two to the power of 3", {"power": "^", "do_simple_evals": False}, "2^3"),
-    ("two to the third power", {"power": "^"}, "8"),
-    ("two to the third", {"power": "^"}, "8"),
-    ("two to the five hundredth power", {"power": "^", "do_simple_evals": False}, "2^500"),
-    ("two to the one hundred twenty-seventh power", {"power": "^", "do_simple_evals": False}, "2^127"),
-    ("two to the one hundred twenty-seventh power", {"power": "^"}, "170141183460469231731687303715884105728"),
-    ("two to the one thousand twenty-seventh power", {"power": "^"}, "1438154507889852726183444152631219786894381583153845258187440649261861406444007705061667818579260288168960911038971146861270318150515332979942779445115792995022143147398923882210417756809968752955624663616680046150705205458739703051791304884326617897306804085476690385919577967507837730438682850636993793097728"),
-    ("square root of 5", {"power": "^"}, "5^(1/2)"),
-    ("square root of 5", {"power": "^", "do_fraction_evals": True, "res": 3}, "2.236"),
-    ("square root of 5", {"power": "^", "do_fraction_evals": True, "res": 10}, "2.2360679775"),
-    ("5th root of 32", {}, "32**(1/5)"),
-]
-
-SCI = [
-  ("six e five", {}, "600000"),
-  ("6 e -5", {}, "0.00006"),
-  ("six times ten to the fifth", {"power":"^", "mult": " x "}, "600000"),   # via 6*10^5 -> 6e5
-  ("6*10^5", {}, "600000"),
-  ("6*10**(5)", {"do_simple_evals": False}, "6*(10**(5))"),
-]
-
-
-ACTUAL_MATH = [
-    ("one and a half", {}, "1.5"),
-    ("one and a third", {}, "4/3"),
-    ("one and a third", {"res": 3}, "1.333"),
-    ("one and two thirds", {"res": 3}, "1.667"),
-    ("one and two thirds", {"res": 4}, "1.6667"),
-    ("one point five", {"res": 4}, "1.5"),
-    ("one and a half", {"res": 4}, "1.5"),
-
-    ("a day and a half", {}, "1.5 days"),# right now is 'a day and 1/2'
-    ("a day and a half", {}, "1.5 days"),# right now is 'a day and a half'
-    ("a day and a half an hour", {"do_simple_evals": False}, "a day and 1/2 an hour"),
-    ("five days and a half", {}, "5.5 days"),
-]
-
-MORE = [
-    ("a dozen eggs", {}, "12 eggs"),
-    ("five dozen donuts", {"do_simple_evals": False}, "5*12 donuts"),
-    ("five dozen donuts", {}, "60 donuts"),
-    ("8 sets of 3 cds", {"do_simple_evals": False}, "8*3 cds"),
-    ("8 sets of 3 cds", {}, "24 cds"),
-    ("8 hours", {"config": "units"}, "28800 s"),
-    ("8hours", {"config": "units"}, "28800s"),
-    ("8hr", {"config": "units"}, "28800s"),
-    ("8hr and 5min", {"config": "units"}, "29100s"),
-    ("8hr5min", {"config": "units"}, "29100s"),
-    ("half of an hour after sunrise", {"units": Unit("hour",value=60, new_unit="minute")}, "30 minutes after sunrise"),
-    ("an hour and a half after sunset", {}, "an hour and 0.5 after sunset"),
-    ("an hour and a half after sunset", {"units": Unit("hour", base=True)}, "1.5 hours after sunset"),
-    ("an hour and a half after sunset", {"units": Unit("hour",value=60, new_unit="minute")}, "90 minutes after sunset"),
-    ("five and two thirds hours after noon", {}, "17/3 hours after noon" ),
-    ("five and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "340 minutes after noon" ),
-    ("five minutes and two thirds hours after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "45 minutes after noon" ),
-    ("an hour and 22 minutes after noon", {"units": Unit("hour", value=60, new_unit="minute")}, "82 minutes after noon" ),
-    ("an hour and 22 minutes and 43 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
-    ("an hour and 23 minutes minus 17 seconds after noon", {"units": units.seconds}, "4963 s after noon" ),
-    ("5 seconds less than a minute", {"units": units.seconds}, "55 s" ),
-    ("an hour and a half less than two hours",{"units": Unit("hour", base=True)}, "0.5 hours" ),
-    ("5.5 minutes less than two hours",{"units": Unit("hour", value=60, new_unit="minute")}, "114.5 minutes" ),
-    ("5 minutes and 35 seconds less than two hours",{"units": units.seconds}, "6865 s" ),
-    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE}, "1h54m25s" ),
-    ("5 minutes and 35.5 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": None,}, "1h54m24s500ms" ),
-    ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": 2, }, "1h54m" ),
-]
-
-TESTS = [
-    *EXAMPLES,
-    *STORIES,
-    *FORMATTING_TALES,
-    *EDGE_CASE_CHRONICLES,
-    *SUFFIX_SAGAS,
-    *ORDINAL_AND_TIME_TALES,
-    *ROMAN_TALES,
-    *SIGNED_TALES,
-    *DECIMAL_TALES,
-    *THS,
-    *MATH,
-    *SCI,
-    *ACTUAL_MATH,
-    *MORE
-]
-
-def demo(text, raise_exc=False, **kwargs):
-    k = ", ".join(f"{k2}={v2}" for k2, v2 in kwargs.items())
-    cs = f", {k}" if k else ""
-    print(f"digitize('{text}'{cs}) => ")
-    try:
-        out = digitize(text, **kwargs)
-        print(f"\t'{out}'")
-        return out
-    except Exception as e:
-        print(f"\t{type(e)}: {e}")
-        if raise_exc:
-            raise
-def test_digitize(text, kwargs, expected):
-    assert demo(text, raise_exc=True, **kwargs) == expected
-
-
-def test_many(suite):
-    for i, (text, kwargs, x) in enumerate(suite):
-        print(f"{i}. ", end="")
-        test_digitize(text, kwargs, x)
-
-def loop(raise_exc=False, **kwargs):
-    try:
-        while True:
-            demo(input(), raise_exc=raise_exc, **kwargs)
-    except KeyboardInterrupt:
-        exit(1)
-
-def _get_suite(name: str):
-    name = name.lower()
-    if name in {"tests", "test", "all"}:
-        return TESTS
-    if name in {"examples", "example"}:
-        return EXAMPLES
-    if name in {"stories", "story"}:
-        return STORIES
-    if name in {"formatting", "formatting_tales"}:
-        return FORMATTING_TALES
-    if name in {"edges", "edge", "edge_cases", "edge_case_chronicles"}:
-        return EDGE_CASE_CHRONICLES
-    if name in {"suffix", "suffixes", "suffix_sagas"}:
-        return SUFFIX_SAGAS
-    if name in {"ordinal", "ordinals", "ordinal_and_time", "ordinal_and_time_tales"}:
-        return ORDINAL_AND_TIME_TALES
-    if name in {"roman", "romans", "roman_tales"}:
-        return ROMAN_TALES
-    if name in {"signed", "signs", "signed_tales"}:
-        return SIGNED_TALES
-    if name in {"decimal", "decimals", "decimal_tales"}:
-        return DECIMAL_TALES
-    if name in {"ths"}:
-        return THS
-    if name in {"math"}:
-        return MATH
-    if name in {"sci"}:
-        return SCI
-    if name in {"actual_math"}:
-        return ACTUAL_MATH
-    if name in {"more"}:
-        return MORE
-    raise ValueError(f"unknown suite: {name}")
-
-def _parse_kwargs(pairs: list[str]) -> dict:
-    """
-    Parse CLI kwargs like:
-      --kw config=token --kw use_commas=true --kw res=10 --kw power=^
-    """
-    out: dict = {}
-    for item in pairs:
-        if "=" not in item:
-            raise ValueError(f"bad --kw {item!r}; expected key=value")
-        k, v = item.split("=", 1)
-        k = k.strip()
-        v = v.strip()
-
-        vl = v.lower()
-        if vl in {"true", "false"}:
-            out[k] = (vl == "true")
-            continue
-        if vl in {"none", "null"}:
-            out[k] = None
-            continue
-
-        # int?
-        try:
-            if re.fullmatch(r"[+-]?\d+", v):
-                out[k] = int(v)
-                continue
-        except Exception:
-            pass
-
-        # float?
-        try:
-            if re.fullmatch(r"[+-]?\d+\.\d+", v):
-                out[k] = float(v)
-                continue
-        except Exception:
-            pass
-
-        out[k] = v
-    return out
-
-def demo_loop(suite="test", **kwargs):
-    suite = _get_suite(suite)
-    test_many(suite)
-    loop(**kwargs)
-
-
-def main(argv: list[str] | None = None) -> int:
-    argv = sys.argv[1:] if argv is None else argv
-
-    ap = argparse.ArgumentParser(
-        prog="digitize",
-        description="Convert number-words to digits and (optionally) evaluate simple math.",
-    )
-
-    ap.add_argument(
-        "text",
-        nargs="*",
-        help="Input text. If omitted, reads from stdin (single pass).",
-    )
-
-    ap.add_argument(
-        "-m",
-        "--mode",
-        choices=["single", "loop", "tests", "examples", "demo"],
-        default="single",
-        help="single: digitize once (default). loop: REPL. tests/examples: run suite. demo: run tests then REPL.",
-    )
-
-    ap.add_argument(
-        "--suite",
-        default="tests",
-        help="Suite name for mode=tests/examples/demo (default: tests).",
-    )
-
-    ap.add_argument(
-        "--kw",
-        action="append",
-        default=[],
-        metavar="KEY=VAL",
-        help="Pass digitize() kwargs (repeatable). Example: --kw config=token --kw res=10 --kw power=^",
-    )
-
-    ap.add_argument(
-        "--newline",
-        action="store_true",
-        help="When reading stdin (single mode), process line-by-line instead of whole blob.",
-    )
-
-    args = ap.parse_args(argv)
-    kwargs = _parse_kwargs(args.kw)
-
-    def _read_stdin() -> str:
-        return sys.stdin.read()
-
-    def _run_single_text(text: str) -> None:
-        out = digitize(text, **kwargs)
-        sys.stdout.write(out)
-        if not out.endswith("\n"):
-            sys.stdout.write("\n")
-
-    # ---- dispatch ----
-    if args.mode in {"tests", "examples"}:
-        suite = _get_suite(args.suite if args.mode == "tests" else "examples")
-        test_many(suite)
-        return 0
-
-    if args.mode == "demo":
-        demo_loop(args.suite, **kwargs)
-        return 0
-
-    if args.mode == "loop":
-        loop(**kwargs)
-        return 0
-
-    # single (default)
-    if args.text:
-        _run_single_text(" ".join(args.text))
-        return 0
-
-    # stdin path
-    data = _read_stdin()
-    if args.newline:
-        for line in data.splitlines(True):
-            if line.endswith("\n"):
-                print(digitize(line[:-1], **kwargs))
-            else:
-                print(digitize(line, **kwargs))
-    else:
-        _run_single_text(data.rstrip("\n"))
-
-    return 0
-
-
-def build_md_table(suite):
-    results = []
-    def limit_width(s, n = 60):
-        if len(s) > n:
-            return s[:n - 3] + "..."
-        return s
-    for prompt, params, _ in suite:
-        if "\n" in prompt:
-            continue
-        out = digitize(prompt, **params)
-        results.append({
-            "prompt": limit_width(str(prompt)),
-            "params": limit_width(str(params)),
-            "output": limit_width(str(out)),
-        })
-
-    headers = ["prompt", "output", "params"]
-
-    # compute column widths
-    widths = {
-        h: max(len(h), max(len(row[h]) for row in results))
-        for h in headers
-    }
-
-    def row(values):
-        return "| " + " | ".join(
-            values[h].ljust(widths[h]) for h in headers
-        ) + " |"
-
-    lines = []
-    lines.append(row({h: h for h in headers}))
-    lines.append("| " + " | ".join("-" * widths[h] for h in headers) + " |")
-
-    for r in results:
-        lines.append(row(r))
-
-    return "\n".join(lines)
 
 
 
 if __name__ == "__main__":
+    from digitize.cli import main
     # print(build_md_table(TESTS))
     # # pass
     # # loop(config="units", raise_exc=True)

@@ -337,7 +337,6 @@ class UnitGroup:
     children: Iterable[Unit] = ()
 
     def __post_init__(self):
-        base_keys = []
         if isinstance(self.base, str):
             base_keys = [self.base]
         elif isinstance(self.base, Iterable):
@@ -457,20 +456,22 @@ class unit_modes:
 
 
 def flatten_units(units: Unit | UnitGroup | Iterable[Unit | UnitGroup]):
+    # print("flatten_units", units)
     all_units = []
     if isinstance(units, UnitGroup | Unit):
         all_units = units.children
     else:
         for u in units:
-            all_units.extend(u.children)
 
+            all_units.extend(u.children)
+    # print("all_units", all_units)
     return list(sorted(all_units, key=lambda u: len(u.key), reverse=True))
 
 
 class AllUnits(list):
-    def __new__(cls, *args):
-        units = args if len(args) > 1 else args[0]
-        return super().__new__(cls, flatten_units(units))
+    # def __new__(cls, *args):
+    #     units = args if len(args) > 1 else args[0]
+    #     return super().__new__(cls, flatten_units(units))
 
     def specified_base_units(self):
         return [u for u in self if u.base]
