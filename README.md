@@ -41,7 +41,6 @@ digitize -m demo
 ## NOTES
 **TL;DR;** trust this project only as much as you trust the tests.
 
-
 | prompt                                             | output                                                       | params                                                       |
 | -------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | i have one hundred and one dalmatians              | i have 101 dalmatians                                        | {}                                                           |
@@ -223,11 +222,6 @@ digitize -m demo
 | square root of 5                                   | 2.236                                                        | {'power': '^', 'do_fraction_evals': True, 'res': 3}          |
 | square root of 5                                   | 2.2360679775                                                 | {'power': '^', 'do_fraction_evals': True, 'res': 10}         |
 | 5th root of 32                                     | 32**(1/5)                                                    | {}                                                           |
-| six e five                                         | 600000                                                       | {}                                                           |
-| 6 e -5                                             | 0.00006                                                      | {}                                                           |
-| six times ten to the fifth                         | 600000                                                       | {'power': '^', 'mult': ' x '}                                |
-| 6*10^5                                             | 600000                                                       | {}                                                           |
-| 6*10**(5)                                          | 6*(10**(5))                                                  | {'do_simple_evals': False}                                   |
 | one and a half                                     | 1.5                                                          | {}                                                           |
 | one and a third                                    | 4/3                                                          | {}                                                           |
 | one and a third                                    | 1.333                                                        | {'res': 3}                                                   |
@@ -239,6 +233,11 @@ digitize -m demo
 | a day and a half                                   | 1.5 days                                                     | {}                                                           |
 | a day and a half an hour                           | a day and 1/2 an hour                                        | {'do_simple_evals': False}                                   |
 | five days and a half                               | 5.5 days                                                     | {}                                                           |
+| six e five                                         | 600000                                                       | {}                                                           |
+| 6 e -5                                             | 0.00006                                                      | {}                                                           |
+| six times ten to the fifth                         | 600000                                                       | {'power': '^', 'mult': ' x '}                                |
+| 6*10^5                                             | 600000                                                       | {}                                                           |
+| 6*10**(5)                                          | 6*(10**(5))                                                  | {'do_simple_evals': False}                                   |
 | a dozen eggs                                       | 12 eggs                                                      | {}                                                           |
 | five dozen donuts                                  | 5*12 donuts                                                  | {'do_simple_evals': False}                                   |
 | five dozen donuts                                  | 60 donuts                                                    | {}                                                           |
@@ -263,3 +262,6 @@ digitize -m demo
 | an hour and a half less than two hours             | 0.5 hours                                                    | {'units': Unit(key=hour, value=1, ...)}                      |
 | 5.5 minutes less than two hours                    | 114.5 minutes                                                | {'units': Unit(key=hour, value=60, ...)}                     |
 | 5 minutes and 35 seconds less than two hours       | 6865 s                                                       | {'units': UnitGroup(s)}                                      |
+| 5 minutes and 35 seconds less than two hours       | 1h54m25s                                                     | {'units': UnitGroup(s), 'unit_mode': 'cascade'}              |
+| 5 minutes and 35.5 seconds less than two hours     | 1h54m24s500ms                                                | {'units': UnitGroup(s), 'unit_mode': 'cascade', 'unit_max... |
+| 5 minutes and 35 seconds less than two hours       | 1h54m                                                        | {'units': UnitGroup(s), 'unit_mode': 'cascade', 'unit_max... |
