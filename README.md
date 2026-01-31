@@ -10,7 +10,7 @@ A natural language number string normalizer for Python and Typescript.
 
 ## Install
 ```bash
-pip install -e .
+pip install modularizer-digitize
 ```
 
 ## Python Usage
