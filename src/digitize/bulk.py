@@ -1,9 +1,8 @@
 #!/usr/bin/env python3
 import re
 import sys
-import time
 from fractions import Fraction
-from typing import Callable, Tuple
+from typing import Tuple
 
 from digitize.attrstr import attrstr
 from digitize.config import DigitizeMode, DigitizeParams, default
@@ -32,8 +31,9 @@ def digitize(
     config: DigitizeMode  | DigitizeParams = default,
     _iter: bool = True,
     call_level: int = 0,
+        raw: bool = False,
     **kwargs # Accepts DigitizeParams args
-) -> str:
+) -> str | attrstr:
 
     initial=s
     skip = Stage.FULL in kwargs.get("skip_stages", config.skip_stages if isinstance(config, DigitizeParams) else ())
@@ -47,7 +47,8 @@ def digitize(
     )
 
     if skip or (not s.strip()):
-        return result.finish(initial)
+        s = result.finish(initial)
+        return str(s) if raw else s
 
     # first, merge params with the default config profile selected
     # basically there are two toggles.
@@ -81,7 +82,8 @@ def digitize(
     recurse_kwargs = {
         "config": config,
         "call_level": call_level + 1,
-        "_iter": False
+        "_iter": False,
+        "raw": False,
     }
     recurse = lambda _s, **kw: digitize(_s, **recurse_kwargs, **kw)
 
@@ -91,7 +93,9 @@ def digitize(
     if len(chunks) > 1:
         if update := stage_enabled(Stage.SPLIT_BY_BREAKS):
             update(chunks, f"breaks={config.breaks}, seps={seps}")
-        return merge_chunks([recurse(c) for c in chunks], seps=seps)
+        s =  merge_chunks([recurse(c) for c in chunks], seps=seps)
+        s = result.finish(s)
+        return str(s) if raw else s
 
 
     # tokenize repeat words like times, etc.
@@ -1205,21 +1209,19 @@ def digitize(
                 )
                 s = update(s2, g)
 
-    return result.finish(s)
+    s = result.finish(s)
+    return str(s) if raw else s
 
 
 
 
 if __name__ == "__main__":
-    from digitize import units
-    s=digitize("5 minutes and 35 seconds less than two hours", units=units.seconds)
-    r = s.result
-    # from digitize.cli import main
+    from digitize.cli import main
     # # print(build_md_table(TESTS))
     # # # pass
     # # # loop(config="units", raise_exc=True)
     # # # loop(raise_exc=True)
     # # # print("simple_eval", simple_eval("5*12 donuts"))
-    # if not sys.argv[1:]:
-    #     raise SystemExit(main(["", "-m", "demo"]))
-    # raise SystemExit(main())
+    if not sys.argv[1:]:
+        raise SystemExit(main(["", "-m", "demo"]))
+    raise SystemExit(main())

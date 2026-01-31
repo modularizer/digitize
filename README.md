@@ -2,15 +2,11 @@
 A natural language number string normalizer for Python and Typescript.
 
 # DISCLAIMER!!
-This is VERY non-standard, experimental project serving as a proof of concept. It would need a serious refactor to be maintainable.
-
-* For fun, not for production
+* written for fun, not for production
 * Definitely not optimized for efficiency
 * Super dumb and way too smart
-* Kinda fun
-* Very powerful
-* VERY poorly written
 * Decently tested (>200 tests of various use cases)
+* Extremely configurable
 
 ## Install
 ```bash
@@ -45,10 +41,6 @@ digitize -m demo
 ## NOTES
 **TL;DR;** trust this project only as much as you trust the tests.
 
-1. YES: this repo heavily-used vibe-coding
-2. YES: the source-code is awful and insane. It is NOT the way I normally write code, but I made and exception for this project
-3. In most projects I write readable code with a few tests. In this project the code is very difficult to follow, but there are 200 tests. It is a tradeoff...
-4. The TS/JS package is a bit out of date, doesnt have all the features of the python
 
 | prompt                                             | output                                                       | params                                                       |
 | -------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
