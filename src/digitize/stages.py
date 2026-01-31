@@ -1,5 +1,9 @@
-from dataclasses import dataclass
-from typing import Any, Iterable
+import time
+from dataclasses import dataclass, field
+from typing import Any, Literal
+
+from digitize.attrstr import attrstr
+from digitize.sentinel import _sentinel
 
 StageName = Literal[
     "input", "split by breaks", "repeat_sentinel_preprocessed",
@@ -12,7 +16,7 @@ StageName = Literal[
     "and-a", "and-b", "of", "and-c",
     "simple-evals", "times", "simple-evals-2",
     "hanging-set", "merge-units", "merge-units-2",
-    "simple-evals-3", "merge-units-b", "iter", "unit_merge",
+    "simple-evals-3", "merge-units-b", "iter", "unit_merge", "full"
 ]
 
 class Stage:
@@ -54,6 +58,9 @@ class Stage:
     MERGE_UNITS_B: StageName = "merge-units-b"
     ITER: StageName = "iter"
     UNIT_MERGE: StageName = "unit_merge"
+    FULL: StageName = "full"
+
+
 
 
 @dataclass
@@ -61,13 +68,36 @@ class StageResult:
     stage: StageName
     new: str | None = None
     changed: bool = True
-    prev: "StageResult | None" = None
+    prev: "StageResult | None | str" = None
     ctx: Any = None
     skipped: bool = False
     call_level: int | None = 0
+    stages: list["StageResult"] = field(default_factory=list)
+    started_at: float | None = field(default_factory=time.perf_counter)
+    finished_at: float | None = None
+    log: bool = False
+    log_context: bool = False
 
-    def get_explanation(self, log_context: bool | Iterable[StageName] = True):
-        ctx = (self.stage + ((f"({self.ctx!r})" if self.ctx else "") if log_context is True or (log_context and self.stage in log_context) else ""))
+    def __post_init__(self):
+        if isinstance(self.prev, str):
+            self.prev = StageResult(stage=Stage.INPUT, new=self.prev)
+
+    @property
+    def elapsed(self) -> float | None:
+        if self.finished_at is None or self.started_at is None:
+            return None
+        return self.finished_at - self.started_at
+
+    @property
+    def ms(self):
+        return self.elapsed * 1000 if self.elapsed is not None else None
+
+    @property
+    def us(self):
+        return self.elapsed * 1e6 if self.elapsed is not None else None
+
+    def get_explanation(self):
+        ctx = (self.stage + ((f"({self.ctx!r})" if self.ctx else "") if self.log_context is True or (self.log_context and self.stage in self.log_context) else ""))
         if ctx:
             ctx += ": "
         n = f"'{self.new}'" if isinstance(self.new, str) else self.new
@@ -90,14 +120,18 @@ class StageResult:
 
 
     def precursors(self, max_levels: int | None = None):
-        prevs = [self.prev] if isinstance(self.prev, StageResult) else []
-        if prevs and (max_levels is None or max_levels > 1):
-            prevs.extend(self.prev.precursors(max_levels - 1))
+        prevs = [self.prev] if self.prev is not None else []
+        if isinstance(self.prev, StageResult) and (max_levels is None or max_levels > 1):
+            prevs.extend(self.prev.precursors(max_levels - 1 if max_levels is not None else None))
         return prevs
 
     @property
     def history(self):
-        return list(reversed(self.precursors()))
+        return list(reversed(self.precursors())) + [self]
+
+    @property
+    def changes(self):
+        return [x for x in self.stages if x.changed]
 
     def __iter__(self):
         return iter(self.history)
@@ -110,3 +144,29 @@ class StageResult:
         if isinstance(n, int) and n < 0:
             return self.precursors(-1 * n)[0]
         return self.history[n]
+
+    def __call__(self, *args, **kwargs):
+        return self.finish(*args, **kwargs)
+
+    def finish(self, new: str | None = _sentinel, ctx=_sentinel, **kwargs):
+        self.finished_at = time.perf_counter()
+        if new is not _sentinel:
+            self.new = new
+        if ctx is not _sentinel:
+            self.ctx = ctx
+        self.changed = self.new != self.old
+        self.__dict__.update(kwargs)
+        if self.log:
+            print(self.get_explanation())
+        return self.result
+
+    def skip(self, **kwargs):
+        self.skipped = True
+        self.finished_at = time.perf_counter()
+        self.changed = False
+        self.__dict__.update(kwargs)
+        return self.result
+
+    @property
+    def result(self):
+        return attrstr(self.content, result=self)
