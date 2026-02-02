@@ -10,7 +10,7 @@ from digitize import config as modes
 from digitize.patterns import chunk_string, merge_chunks, any_word
 from digitize.sentinel import _sentinel
 from digitize.stages import StageResult, StageName, Stage
-from digitize.tasks.fractions import frac_to_exact_str
+from digitize.tasks.fracs import frac_to_exact_str
 from digitize.tasks.replace_multipliers import replace_multipliers
 from digitize.tasks.simple_eval import simple_eval
 from digitize.tasks.unit_cascade import get_level_merger
@@ -31,7 +31,7 @@ def digitize(
     config: DigitizeMode  | DigitizeParams = default,
     _iter: bool = True,
     call_level: int = 0,
-        raw: bool = False,
+    raw: bool = False,
     **kwargs # Accepts DigitizeParams args
 ) -> str | attrstr:
 
@@ -1117,12 +1117,18 @@ def digitize(
 
     if update := stage_enabled(Stage.TIMES):
         s2 = re.sub(
-            rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple|set)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
+            rf"({num_atom})\s?(?:time|multiplied|timesed|occurence|instance|attempt|multiply|multiple)(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
             rf"\1{config.mult}\2",
             s,
             flags=re.IGNORECASE,
         )
-        s = update(s2)
+        s3 = re.sub(
+            rf"({num_atom})\s?set(?:\(s\))?s?(?: (?:by|of))?\s+({num_atom})",
+            rf"(\1{config.mult}\2)" if config.do_simple_evals else rf"\1{config.mult}\2",
+            s2,
+            flags=re.IGNORECASE,
+        )
+        s = update(s3)
 
     if config.do_simple_evals:
         if update := stage_enabled(Stage.SIMPLE_EVALS_2):

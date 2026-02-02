@@ -2,7 +2,7 @@ import re
 from fractions import Fraction
 from typing import Literal
 
-from digitize.tasks.fractions import frac_to_exact_str, frac_to_decimal_str, parse_num_to_fraction, level_to_frac
+from digitize.tasks.fracs import frac_to_exact_str, frac_to_decimal_str, parse_num_to_fraction, level_to_frac
 
 
 def get_level_merger(levels, names, *, unit_max_cascade: int | Literal["base"] = None):

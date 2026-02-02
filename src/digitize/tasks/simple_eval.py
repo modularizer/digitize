@@ -280,11 +280,18 @@ def simple_eval(
 ) -> str:
     s = s.replace(power, "**").replace(mult, "*").replace(div, "/")
 
+
     expr_rx = re.compile(r"""
-        [0-9\(\)\.pPiI]                # first non-space char
-        [0-9\(\)\.\s\+\-\*/pPiI]*      # middle (spaces allowed)
-        [0-9\)\.pPiI]                  # last non-space char
-    """, re.VERBOSE)
+            (?:[\(\)]|^|(?<=\s))              # boundary: paren or word-break before
+            [0-9\.]                # first non-space char
+            [0-9\(\)\.\s\+\-\*/]*      # middle (spaces allowed)
+            [0-9\(\)\.]                  # last non-space char
+        """, re.VERBOSE)
+    # expr_rx = re.compile(r"""
+    #         [0-9\(\)\.pPiI]                # first non-space char
+    #         [0-9\(\)\.\s\+\-\*/pPiI]*      # middle (spaces allowed)
+    #         [0-9\)\.pPiI]                  # last non-space char
+    #     """, re.VERBOSE)
     for m in reversed(list(expr_rx.finditer(s))):
         expr = m.group(0)
         if not _has_real_math(expr):
@@ -338,3 +345,9 @@ def simple_eval(
 
     s = s.replace("**", power).replace("*", mult).replace("/", div)
     return s
+
+
+if __name__ == "__main__":
+    print(simple_eval('2026-01-25T14:30:00+00:00'))
+    print(simple_eval('(5*10)'))
+    print(simple_eval('1/2 p'))

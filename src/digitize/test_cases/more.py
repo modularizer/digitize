@@ -29,4 +29,5 @@ MORE = [
     ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE}, "1h54m25s" ),
     ("5 minutes and 35.5 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": None,}, "1h54m24s500ms" ),
     ("5 minutes and 35 seconds less than two hours", {"units": units.seconds, "unit_mode": unit_modes.CASCADE, "unit_max_cascade": 2, }, "1h54m" ),
+    ("half past 5", {}, "0.5 past 5")
 ]
